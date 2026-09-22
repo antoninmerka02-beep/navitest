@@ -1,0 +1,40 @@
+name: Build NaviTest IPA
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project NaviTest.xcodeproj -scheme NaviTest -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -n 80
+
+      - name: Package IPA
+        run: |
+          APP=$(find build/Build/Products -maxdepth 2 -name 'NaviTest.app' | head -1)
+          [ -n "$APP" ] || { echo "Build nevytvořil NaviTest.app"; exit 1; }
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          # ad-hoc podpis, aby Sideloadly jen nahradil existující podpis
+          codesign --force --sign - --timestamp=none Payload/NaviTest.app
+          zip -qry NaviTest.ipa Payload
+          ls -la NaviTest.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NaviTest-ipa
+          path: NaviTest.ipa
