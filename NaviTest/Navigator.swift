@@ -7,6 +7,8 @@ struct RouteManeuver {
     let road: String
     let text: String
     let coordinate: CLLocationCoordinate2D
+    var rbExit: Int = 0
+    var rbAround: Double = 180
 }
 
 /// Trasa z Apple Map převedená na jednu lomenou čáru + seznam manévrů na ní.
@@ -57,9 +59,27 @@ final class NavRoute {
             let at = c[idx]
             let isLast = i == steps.count - 1
             let delta = NavRoute.turnDelta(points: pts, cum: c, at: at)
-            let icon = NavRoute.classify(text, delta: delta, isLast: isLast)
+            var icon = NavRoute.classify(text, delta: delta, isLast: isLast)
+            var rbExit = 0
+            var rbAround = 180.0
+            if TurnIcon.isRoundabout(icon) {
+                // Směr výjezdu: příjezd (posledních 30 m) vs. odjezd (80–130 m za vjezdem)
+                let inB = NavRoute.bearing(NavRoute.pointAt(points: pts, cum: c, d: at - 30),
+                                           NavRoute.pointAt(points: pts, cum: c, d: at))
+                let outB = NavRoute.bearing(NavRoute.pointAt(points: pts, cum: c, d: at + 80),
+                                            NavRoute.pointAt(points: pts, cum: c, d: at + 130))
+                var d = outB - inB
+                while d > 180 { d -= 360 }
+                while d < -180 { d += 360 }
+                var around = 180 - d
+                if around <= 0 { around += 360 }
+                if around > 360 { around -= 360 }
+                rbAround = around
+                icon = TurnIcon.roundabout(around: around)
+                rbExit = NavRoute.exitNumber(text)
+            }
             man.append(RouteManeuver(at: at, icon: icon, road: NavRoute.roadName(text), text: text,
-                                     coordinate: pts[idx].coordinate))
+                                     coordinate: pts[idx].coordinate, rbExit: rbExit, rbAround: rbAround))
         }
         if man.last.map({ $0.icon > 2 }) ?? true {
             man.append(RouteManeuver(at: total, icon: TurnIcon.arriving, road: destinationName, text: "Cíl",
@@ -162,6 +182,13 @@ final class NavRoute {
         if a < 135 { return goLeft ? TurnIcon.turnL : TurnIcon.turnR }
         if a < 170 { return goLeft ? TurnIcon.sharpL : TurnIcon.sharpR }
         return TurnIcon.uturnL
+    }
+
+    /// „… 2. výjezdem …“ → 2
+    static func exitNumber(_ text: String) -> Int {
+        guard let r = text.range(of: #"\d+\.\s*výjezd"#, options: .regularExpression) else { return 0 }
+        let digits = text[r].prefix { $0.isNumber }
+        return Int(digits) ?? 0
     }
 
     static func roadName(_ text: String) -> String {
@@ -279,11 +306,13 @@ final class Navigator {
         s.currentRoad = idx > 0 ? r.maneuvers[idx - 1].road : ""
         s.upcoming = r.maneuvers[idx...].prefix(5).map { UpcomingItem(icon: $0.icon, dist: max(0, $0.at - along), text: $0.text) }
         s.maneuverIndex = idx
+        s.rbExit = m.rbExit
+        s.rbAround = m.rbAround
         if let loc = lastLocation {
             s.position = matchDist < 40 ? r.point(at: along).coordinate : loc.coordinate
         }
         s.heading = heading
-        s.routeAhead = r.coords(from: along, to: along + 5000)
+        s.routeAhead = r.coords(from: along, to: r.total)   // celá zbývající trasa
         s.routeBehind = r.coords(from: along - 400, to: along)
         s.maneuverPoint = m.coordinate
         if arrivedAt != nil {

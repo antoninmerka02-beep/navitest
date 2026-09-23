@@ -155,6 +155,20 @@ enum NL {
         return .init(svc: 6, pdt: pdtValue, payload: w.b)
     }
 
+    // MARK: Oblíbená místa (obsah typu 3) – seznam pro výběr cíle joystickem
+    /// Hlavička seznamu: počet položek.
+    static func favPoiUpdate(count: Int) -> NLMessage {
+        var w = ByteWriter(); w.u16(count); w.u8(0)
+        return .init(svc: 7, pdt: pdtPointer, payload: w.b)
+    }
+    /// Položka: index položky, index seznamu (0/1 střídavě), směr (1 = rovně, po 45° po směru hodinek), vzdálenost, název.
+    static func favPoiData(list: Int, item: Int, direction: UInt8, dist: Float, unit: String, name: String) -> NLMessage {
+        let u = utf8Capped(unit, maxBytes: 16), n = utf8Capped(name)
+        var w = ByteWriter()
+        w.u16(item); w.u16(list); w.u8(Int(direction)); w.u8(n.count); w.u8(u.count); w.f32(dist); w.raw(u); w.raw(n)
+        return .init(svc: 98, pdt: pdtPointer, payload: w.b)
+    }
+
     // MARK: Obraz (obsah typu 1)
     /// imageType 3 = rozšířený navigační pohled, sekvence u16 LE, pak baseline JPEG 480×240.
     static func image(seq: Int, jpeg: [UInt8], imageType: UInt8 = 3) -> NLMessage {
@@ -181,9 +195,12 @@ enum NL {
     /// Škola: přístrojovka sama kreslí „School Zone“, text je jen vzdálenost.
     static func schoolZone(distance: String, show: Bool) -> NLMessage { naviEvent(type: 4, text: distance, show: show) }
     /// Hranice: podtyp 42 = stát, 41 = region; text je vzdálenost.
-    static func border(country: Bool, distance: String, show: Bool) -> NLMessage {
-        naviEvent(type: 3, text: distance, show: show, subType: country ? 42 : 41)
+    static func border(country: Bool, distance: String) -> NLMessage {
+        naviEvent(type: 3, text: distance, show: true, subType: country ? 42 : 41)
     }
+    /// Zrušení hranice – Garmin ruší s podtypem 126 (ne 42!), jinak se lišta varování zasekne.
+    static func borderClear() -> NLMessage { naviEvent(type: 3, text: "", show: false) }
+    static func schoolZoneClear() -> NLMessage { schoolZone(distance: "", show: false) }
     /// Překročení rychlosti – Garmin posílá typ 1 s prázdným textem.
     static func speedingEvent() -> NLMessage { naviEvent(type: 1, text: "", show: true) }
 
@@ -259,8 +276,13 @@ enum NL {
             ("RADAR červená (9)", speedCamera(limit: "50 km/h", distance: "", cameraType: 5, show: true), "020501083530206b6d2f683b"),
             ("RADAR zrušit (9)", speedCameraClear(), "027e00013b"),
             ("ŠKOLA 200 m (9)", schoolZone(distance: "200 m", show: true), "047e0105323030206d"),
-            ("HRANICE (9)", naviEvent(type: 3, text: "2 km", show: true, subType: 0), "0300010432206b6d"),
+            ("HRANICE (9)", border(country: true, distance: "2 km"), "032a010432206b6d"),
+            ("HRANICE zrušit (9)", borderClear(), "037e0000"),
+            ("ŠKOLA zrušit (9)", schoolZoneClear(), "047e0000"),
             ("RYCHLOST (9)", speedingEvent(), "017e0100"),
+            ("OBLÍBENÉ počet (7)", favPoiUpdate(count: 3), "030000"),
+            ("OBLÍBENÉ položka (98)", favPoiData(list: 1, item: 2, direction: 3, dist: 2.5, unit: "km", name: "Domů"),
+             "02000100030502000020406b6d446f6dc5af"),
         ]
         var lines: [String] = []
         var ok = 0

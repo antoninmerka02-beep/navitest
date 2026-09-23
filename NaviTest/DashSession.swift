@@ -1,7 +1,16 @@
 import Foundation
 import ExternalAccessory
+import CoreLocation
+import MapKit
 
-enum NavServiceChoice: String, CaseIterable, Identifiable {
+/// Místo nabízené v seznamu oblíbených na přístrojovce.
+struct BikeFav {
+    let name: String
+    let coordinate: CLLocationCoordinate2D
+    let tag: String          // "home", "work", id oblíbeného…
+}
+
+enum NavServiceChoice: String, CaseIterable, Identifiable, Codable {
     case auto, svc19, svc4, both
     var id: String { rawValue }
     var label: String {
@@ -14,23 +23,41 @@ enum NavServiceChoice: String, CaseIterable, Identifiable {
     }
 }
 
-enum NavSource: String, CaseIterable, Identifiable {
+enum NavSource: String, CaseIterable, Identifiable, Codable {
     case sim, real
     var id: String { rawValue }
     var label: String { self == .sim ? "Simulace" : "Skutečná" }
 }
 
-struct TestOptions {
+struct TestOptions: Codable {
     var sendImages = true
     var sendNavData = true
     var navService: NavServiceChoice = .auto
-    var imageFps: Double = 2
+    var imageFps: Double = 3
     var jpegQuality: Double = 0.55
-    var navSource: NavSource = .sim
+    var navSource: NavSource = .real
     var mapSource: MapSource = .vector
     var turnBox = true                // vlastní šipka + vzdálenost v obrázku
     var northUp = false
     var darkMap = true
+
+    init() {}
+
+    // Tolerantní načítání: chybějící položka (nová ve verzi appky) = výchozí hodnota
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = TestOptions()
+        sendImages = (try? c.decodeIfPresent(Bool.self, forKey: .sendImages)) ?? d.sendImages
+        sendNavData = (try? c.decodeIfPresent(Bool.self, forKey: .sendNavData)) ?? d.sendNavData
+        navService = (try? c.decodeIfPresent(NavServiceChoice.self, forKey: .navService)) ?? d.navService
+        imageFps = (try? c.decodeIfPresent(Double.self, forKey: .imageFps)) ?? d.imageFps
+        jpegQuality = (try? c.decodeIfPresent(Double.self, forKey: .jpegQuality)) ?? d.jpegQuality
+        navSource = (try? c.decodeIfPresent(NavSource.self, forKey: .navSource)) ?? d.navSource
+        mapSource = (try? c.decodeIfPresent(MapSource.self, forKey: .mapSource)) ?? d.mapSource
+        turnBox = (try? c.decodeIfPresent(Bool.self, forKey: .turnBox)) ?? d.turnBox
+        northUp = (try? c.decodeIfPresent(Bool.self, forKey: .northUp)) ?? d.northUp
+        darkMap = (try? c.decodeIfPresent(Bool.self, forKey: .darkMap)) ?? d.darkMap
+    }
 }
 
 enum ContentMode: String {
@@ -81,20 +108,35 @@ final class DashSession {
     var onStatus: ((SessionStatus) -> Void)?
     /// Příkazy z joysticku / přístrojovky (49 stop trasy, 53 domů, …) – volá se na hlavním vlákně.
     var onBikeCommand: ((UInt8) -> Void)?
+    /// Jezdec vybral cíl ze seznamu oblíbených na přístrojovce – volá se na hlavním vlákně.
+    var onBikeNavigate: ((BikeFav) -> Void)?
+
+    // Oblíbená místa pro přístrojovku (chráněno zámkem)
+    private var bikeFavs: [BikeFav] = []
+    private var homeSet = false
+    private var officeSet = false
+    // Seznam, který motorka právě zobrazuje (jen pracovní vlákno)
+    private var favListIndex = 1
+    private var favsSent: [BikeFav] = []
 
     // Stav, se kterým pracuje jen pracovní vlákno
     private var status = SessionStatus()
     private var mode: ContentMode = .none
     private var model: DashModel = .unknown
-    private var zoomLevel = 6
+    static let defaultZoom = 7          // 4,5 m/px
+    private var zoomLevel: Int = {
+        let z = UserDefaults.standard.object(forKey: "zoomLevel") as? Int ?? DashSession.defaultZoom
+        return min(16, max(0, z))
+    }()
+    private var pendingZoomReset = false
     private var seq = 1
     private var lastTbtIndex = -1
     private var lastSpeedLog = Date.distantPast
     private var lastGuiding: Bool? = nil
     private var lastLoggedSource: MapSource? = nil
 
-    /// metrů na pixel pro jednotlivé úrovně zoomu
-    private let mppTable: [Double] = [0.4, 0.6, 0.9, 1.3, 2, 3, 4.5, 6.5, 10, 15, 22, 33, 50, 75, 110, 160, 240]
+    /// metrů na pixel pro jednotlivé úrovně zoomu (0,25 = nejblíž, 160 = nejdál)
+    private let mppTable: [Double] = [0.25, 0.4, 0.6, 0.9, 1.3, 2, 3, 4.5, 6.5, 10, 15, 22, 33, 50, 75, 110, 160]
 
     init(navigator: Navigator, snapshots: MapSnapshotProvider) {
         self.navigator = navigator
@@ -125,6 +167,23 @@ final class DashSession {
         setRunning(false)
         link.close()
     }
+
+    /// Aktualizace oblíbených míst a příznaků Domů/Práce (z hlavního vlákna).
+    func setBikeFavorites(_ favs: [BikeFav], home: Bool, office: Bool) {
+        lock.lock()
+        let changedHome = home != homeSet, changedOffice = office != officeSet
+        bikeFavs = Array(favs.prefix(50))
+        homeSet = home
+        officeSet = office
+        if _running {
+            if changedHome { pending.append(NL.flag(10, home)) }
+            if changedOffice { pending.append(NL.flag(11, office)) }
+        }
+        lock.unlock()
+    }
+
+    /// Tovární reset zoomu (provede pracovní vlákno).
+    func resetZoom() { lock.lock(); pendingZoomReset = true; lock.unlock() }
 
     /// Pošle zprávy při nejbližší příležitosti (varování apod.).
     func enqueue(_ msgs: [NLMessage]) {
@@ -177,8 +236,9 @@ final class DashSession {
         send(ack)
         send(NL.flag(2, false))
         send(NL.dayNight(1))
-        send(NL.flag(10, false))
-        send(NL.flag(11, false))
+        lock.lock(); let h = homeSet, w = officeSet; lock.unlock()
+        send(NL.flag(10, h))                       // je nastaven Domov
+        send(NL.flag(11, w))                       // je nastavena Práce
         send(NL.flag(13, true))
         send(NL.flag(12, false))
         send(zoomMessage(show: false))
@@ -217,8 +277,17 @@ final class DashSession {
                     handle(f)
                 }
             }
-            // 2) Zprávy z fronty (varování z UI)
-            lock.lock(); let q = pending; pending.removeAll(); lock.unlock()
+            // 2) Zprávy z fronty (varování z UI) + případný reset zoomu
+            lock.lock()
+            let q = pending; pending.removeAll()
+            let doReset = pendingZoomReset; pendingZoomReset = false
+            lock.unlock()
+            if doReset {
+                zoomLevel = DashSession.defaultZoom
+                UserDefaults.standard.removeObject(forKey: "zoomLevel")
+                send(zoomMessage(show: true))
+                status.zoomText = zoomLabel()
+            }
             for m in q { send(m); log("➡️ \(NL.name(m.svc)) [\(m.payload.hex)]") }
 
             let now = Date()
@@ -333,6 +402,8 @@ final class DashSession {
             } else if ct == 2 {
                 mode = .tbt
                 lastTbtIndex = -1
+            } else if ct == 3 {
+                sendFavoritesList()
             }
             publish()
         case 56:
@@ -343,10 +414,25 @@ final class DashSession {
             publish()
         case 51, 52:
             zoomLevel = f.svc == 51 ? max(0, zoomLevel - 1) : min(mppTable.count - 1, zoomLevel + 1)
+            UserDefaults.standard.set(zoomLevel, forKey: "zoomLevel")
             log("⬅️ Joystick: \(f.svc == 51 ? "ZOOM +" : "ZOOM −") → úroveň \(zoomLevel) (\(zoomLabel()))")
             send(zoomMessage(show: true))
             status.zoomText = zoomLabel()
-        case 48, 49, 50, 53, 54:
+        case 48:
+            // [položka u16][seznam u16][volba trasy u8] – ověřeno Garminovým dekodérem
+            log("⬅️ Motorka: start trasy [\(f.payload.hex)]")
+            guard f.payload.count >= 4 else { break }
+            let item = Int(f.payload[0]) | Int(f.payload[1]) << 8
+            let list = Int(f.payload[2]) | Int(f.payload[3]) << 8
+            if list == favListIndex && item < favsSent.count {
+                let fav = favsSent[item]
+                log("🏁 Vybráno na motorce: \(fav.name)")
+                let cb = onBikeNavigate
+                DispatchQueue.main.async { cb?(fav) }
+            } else {
+                log("⚠️ Neznámá položka: seznam \(list) (aktuální \(favListIndex)), položka \(item) z \(favsSent.count)")
+            }
+        case 49, 50, 53, 54:
             log("⬅️ Příkaz z motorky: \(NL.name(f.svc)) [\(f.payload.hex)]")
             let cb = onBikeCommand, svc = f.svc
             DispatchQueue.main.async { cb?(svc) }
@@ -398,6 +484,30 @@ final class DashSession {
                 send(NL.tbtItem(index: 0, icon: first.icon, dist: dd, unit: uu, text: first.text))
             }
         }
+    }
+
+    /// Pošle seznam oblíbených míst (Domů, Práce, oblíbené, poslední cíle) se vzdáleností a směrem.
+    private func sendFavoritesList() {
+        lock.lock(); let favs = bikeFavs; lock.unlock()
+        favListIndex = 1 - favListIndex          // jako Garmin: seznamy 0/1 se střídají
+        favsSent = favs
+        send(NL.favPoiUpdate(count: favs.count))
+        let here = navigator.location
+        let heading = navigator.snapshot()?.heading ?? max(0, here?.course ?? 0)
+        for (i, f) in favs.enumerated() {
+            var dir: UInt8 = 1
+            var dist: Double = 0
+            if let h = here {
+                let target = CLLocation(latitude: f.coordinate.latitude, longitude: f.coordinate.longitude)
+                dist = h.distance(from: target)
+                let b = NavRoute.bearing(MKMapPoint(h.coordinate), MKMapPoint(f.coordinate))
+                let rel = (b - heading + 720).truncatingRemainder(dividingBy: 360)
+                dir = UInt8((Int((rel / 45).rounded()) % 8) + 1)
+            }
+            let (d, u) = formatDistance(dist)
+            send(NL.favPoiData(list: favListIndex, item: i, direction: dir, dist: d, unit: u, name: f.name))
+        }
+        log("➡️ Oblíbená místa pro motorku: \(favs.count) (seznam \(favListIndex))")
     }
 
     private func sendTbtList(_ s: NavSnapshot) {

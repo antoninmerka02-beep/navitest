@@ -13,7 +13,7 @@ final class RouteSimulator {
     let route: [SimManeuver] = [
         .init(icon: TurnIcon.turnL, road: "Třída Tomáše Bati", length: 600, text: "Vlevo na Třídu Tomáše Bati", lanes: [3, 7, 7]),
         .init(icon: TurnIcon.turnR, road: "Zarámí", length: 450, text: "Vpravo na Zarámí", lanes: []),
-        .init(icon: TurnIcon.roundabout, road: "2. výjezd · Gahurova", length: 700, text: "Kruhový objezd, 2. výjezd", lanes: []),
+        .init(icon: TurnIcon.roundabout(around: 180), road: "2. výjezd · Gahurova", length: 700, text: "Kruhový objezd, 2. výjezd", lanes: []),
         .init(icon: TurnIcon.straight, road: "Dlouhá", length: 900, text: "Pokračujte rovně", lanes: [1, 1]),
         .init(icon: TurnIcon.keepL, road: "R49", length: 1500, text: "Držte se vlevo na R49", lanes: [3, 9]),
         .init(icon: TurnIcon.exitR, road: "Otrokovice", length: 1200, text: "Sjeďte vpravo", lanes: [7, 2]),
@@ -43,6 +43,7 @@ final class RouteSimulator {
         var s = NavSnapshot()
         let m = route[index]
         s.icon = m.icon; s.toNext = toNext; s.road = m.road; s.text = m.text; s.lanes = m.lanes
+        if TurnIcon.isRoundabout(m.icon) { s.rbExit = 2; s.rbAround = 180 }
         var remaining = toNext
         var items: [UpcomingItem] = [UpcomingItem(icon: m.icon, dist: toNext, text: m.text)]
         var acc = toNext

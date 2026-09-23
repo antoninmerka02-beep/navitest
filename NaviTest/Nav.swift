@@ -11,11 +11,37 @@ enum TurnIcon {
     static let turnL: UInt8 = 34, turnR: UInt8 = 35
     static let uturnL: UInt8 = 36, uturnR: UInt8 = 37
 
+    static func isRoundabout(_ i: UInt8) -> Bool { i >= 14 && i <= 31 }
+
+    /// SF Symbol pro panel v telefonu.
+    static func symbol(_ i: UInt8) -> String {
+        switch i {
+        case 0...5: return "flag.checkered"
+        case 6, 10: return "arrow.up.left"
+        case 7, 11: return "arrow.up.right"
+        case 14...31: return "arrow.triangle.turn.up.right.circle"
+        case 32: return "arrow.turn.down.left"
+        case 33: return "arrow.turn.down.right"
+        case 34: return "arrow.turn.up.left"
+        case 35: return "arrow.turn.up.right"
+        case 36, 37: return "arrow.uturn.down"
+        default: return "arrow.up"
+        }
+    }
+
+    /// Ikona kruháče podle úhlu objetého po kruhu (CZ jezdí proti směru hodinek):
+    /// 90° = výjezd vpravo, 180° = rovně, 270° = vlevo, 360° = otočka. Ikony 15…22.
+    static func roundabout(around: Double) -> UInt8 {
+        let idx = min(8, max(1, Int((around / 45).rounded())))
+        return UInt8(14 + idx)
+    }
+
     static func name(_ i: UInt8) -> String {
         switch i {
         case 0: return "cíl"; case 1: return "cíl vlevo"; case 2: return "cíl vpravo"
         case 6: return "držet vlevo"; case 7: return "držet vpravo"; case 8: return "rovně"
         case 10: return "sjezd vlevo"; case 11: return "sjezd vpravo"; case 14: return "kruháč"
+        case 15...22: return "kruháč \(Int(i - 14) * 45)°"
         case 32: return "ostře vlevo"; case 33: return "ostře vpravo"
         case 34: return "vlevo"; case 35: return "vpravo"
         case 36: return "otočka"; case 37: return "otočka P"
@@ -47,6 +73,8 @@ struct NavSnapshot {
     var upcoming: [UpcomingItem] = []
     var maneuverIndex: Int = 0
     var arrived = false
+    var rbExit: Int = 0              // kruháč: číslo výjezdu (0 = neznámé)
+    var rbAround: Double = 180       // kruháč: úhel objetý po kruhu
     // Pro kreslení mapy (skutečná navigace)
     var position: CLLocationCoordinate2D? = nil
     var heading: Double = 0

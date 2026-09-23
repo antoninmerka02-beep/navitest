@@ -4,7 +4,7 @@ import CoreText
 import ImageIO
 import MapKit
 
-enum MapSource: String, CaseIterable, Identifiable {
+enum MapSource: String, CaseIterable, Identifiable, Codable {
     case vector, own, apple
     var id: String { rawValue }
     var label: String {
@@ -171,7 +171,14 @@ final class FrameRenderer {
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
         ctx.move(to: pts[0])
-        for q in pts.dropFirst() { ctx.addLine(to: q) }
+        var last = pts[0]
+        for q in pts.dropFirst() {
+            // body blíž než 1,5 px vynecháme – na displeji nejsou vidět
+            if abs(q.x - last.x) + abs(q.y - last.y) < 1.5 { continue }
+            ctx.addLine(to: q)
+            last = q
+        }
+        if let end = pts.last, end != last { ctx.addLine(to: end) }
         ctx.strokePath()
     }
 
@@ -182,7 +189,8 @@ final class FrameRenderer {
         ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 0.78))
         ctx.addPath(CGPath(roundedRect: box, cornerWidth: 9, cornerHeight: 9, transform: nil))
         ctx.fillPath()
-        drawTurnGlyph(ctx, icon: nav.icon, center: CGPoint(x: box.minX + 32, y: box.midY), size: 46)
+        drawTurnGlyph(ctx, icon: nav.icon, center: CGPoint(x: box.minX + 32, y: box.midY), size: 46,
+                      rbExit: nav.rbExit, rbAround: nav.rbAround)
         let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
         let dist: String
         if nav.arrived { dist = "Cíl" } else {
@@ -196,7 +204,8 @@ final class FrameRenderer {
         ctx.restoreGState()
     }
 
-    private func drawTurnGlyph(_ ctx: CGContext, icon: UInt8, center c: CGPoint, size s: CGFloat) {
+    private func drawTurnGlyph(_ ctx: CGContext, icon: UInt8, center c: CGPoint, size s: CGFloat,
+                               rbExit: Int, rbAround: Double) {
         let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
         let accent = CGColor(red: 0.85, green: 1.0, blue: 0.0, alpha: 1)
         ctx.setStrokeColor(white)
@@ -221,15 +230,39 @@ final class FrameRenderer {
             ctx.strokeEllipse(in: CGRect(x: c.x - 14, y: c.y - 14, width: 28, height: 28))
             ctx.setFillColor(accent)
             ctx.fillEllipse(in: CGRect(x: c.x - 6, y: c.y - 6, width: 12, height: 12))
-        case 13...31:                  // kruhový objezd
-            let rc = CGPoint(x: c.x, y: c.y + 2)
-            ctx.strokeEllipse(in: CGRect(x: rc.x - 10, y: rc.y - 10, width: 20, height: 20))
+        case 14...31:                  // kruhový objezd: příjezd zdola, míjené výjezdy šedě, náš se šipkou
+            let r: CGFloat = 10
+            let rc = CGPoint(x: c.x, y: c.y + 3)
+            // bod na kruhu podle úhlu objetého od vjezdu (0 = dole, 90 = vpravo, 180 = nahoře, 270 = vlevo)
+            func onCircle(_ deg: Double, _ rr: CGFloat) -> CGPoint {
+                let a = CGFloat(deg * .pi / 180)
+                return CGPoint(x: rc.x + rr * sin(a), y: rc.y - rr * cos(a))
+            }
+            let target = (icon >= 15 && icon <= 22) ? rbAround : 135
+            let exits = max(1, rbExit)
+            // míjené výjezdy
+            if exits > 1 {
+                ctx.setStrokeColor(CGColor(red: 0.55, green: 0.58, blue: 0.62, alpha: 1))
+                ctx.setLineWidth(4)
+                for k in 1..<exits {
+                    let deg = target * Double(k) / Double(exits)
+                    ctx.move(to: onCircle(deg, r))
+                    ctx.addLine(to: onCircle(deg, r + 8))
+                }
+                ctx.strokePath()
+            }
+            ctx.setStrokeColor(white)
+            ctx.setLineWidth(5)
+            ctx.strokeEllipse(in: CGRect(x: rc.x - r, y: rc.y - r, width: 2 * r, height: 2 * r))
+            ctx.setLineWidth(6)
             ctx.move(to: CGPoint(x: rc.x, y: c.y - s / 2))
-            ctx.addLine(to: CGPoint(x: rc.x, y: rc.y - 10))
+            ctx.addLine(to: onCircle(0, r))
             ctx.strokePath()
-            let d = CGPoint(x: 0.707, y: 0.707)
-            let st = CGPoint(x: rc.x + 7, y: rc.y + 7)
-            let e = CGPoint(x: st.x + d.x * 8, y: st.y + d.y * 8)
+            // náš výjezd se šipkou
+            let st = onCircle(target, r)
+            let e = onCircle(target, r + 9)
+            let dirLen = hypot(e.x - st.x, e.y - st.y)
+            let d = CGPoint(x: (e.x - st.x) / dirLen, y: (e.y - st.y) / dirLen)
             ctx.move(to: st); ctx.addLine(to: e); ctx.strokePath()
             head(at: e, dir: d)
         case 36, 37:                   // otočka

@@ -3,6 +3,7 @@ import UIKit
 import CoreLocation
 import MapKit
 import ExternalAccessory
+import Combine
 
 // MARK: - Poloha (zároveň drží appku naživu na pozadí)
 final class LocationService: NSObject, CLLocationManagerDelegate {
@@ -39,42 +40,114 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     }
 }
 
+// MARK: - Uložená nastavení
+struct AssistSettings: Codable {
+    var cameras = true
+    var schools = true
+    var borders = true
+    var speeding = true
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AssistSettings()
+        cameras = (try? c.decodeIfPresent(Bool.self, forKey: .cameras)) ?? d.cameras
+        schools = (try? c.decodeIfPresent(Bool.self, forKey: .schools)) ?? d.schools
+        borders = (try? c.decodeIfPresent(Bool.self, forKey: .borders)) ?? d.borders
+        speeding = (try? c.decodeIfPresent(Bool.self, forKey: .speeding)) ?? d.speeding
+    }
+}
+
+struct SavedSettings: Codable {
+    var opts = TestOptions()
+    var autoConnect = true
+    var avoidHighways = false
+    var avoidTolls = false
+    var assist = AssistSettings()
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = SavedSettings()
+        opts = (try? c.decodeIfPresent(TestOptions.self, forKey: .opts)) ?? d.opts
+        autoConnect = (try? c.decodeIfPresent(Bool.self, forKey: .autoConnect)) ?? d.autoConnect
+        avoidHighways = (try? c.decodeIfPresent(Bool.self, forKey: .avoidHighways)) ?? d.avoidHighways
+        avoidTolls = (try? c.decodeIfPresent(Bool.self, forKey: .avoidTolls)) ?? d.avoidTolls
+        assist = (try? c.decodeIfPresent(AssistSettings.self, forKey: .assist)) ?? d.assist
+    }
+
+    static let key = "settings.v1"
+    static func load() -> SavedSettings {
+        guard let d = UserDefaults.standard.data(forKey: key),
+              let s = try? JSONDecoder().decode(SavedSettings.self, from: d) else { return SavedSettings() }
+        return s
+    }
+    func save() {
+        if let d = try? JSONEncoder().encode(self) { UserDefaults.standard.set(d, forKey: SavedSettings.key) }
+    }
+}
+
 // MARK: - Model aplikace
 final class AppModel: ObservableObject {
+    // Stav a nastavení
     @Published var status = SessionStatus()
     @Published var accessories: [String] = []
     @Published var selfTestSummary = ""
-    @Published var opts = TestOptions() { didSet { session.options = opts } }
-    @Published var autoConnect = true
-
-    // Navigace
-    @Published var query = ""
-    @Published var results: [MKMapItem] = []
-    @Published var searching = false
-    @Published var routeSummary = ""
-    @Published var routeSteps: [String] = []
-    @Published var calculating = false
-    @Published var avoidHighways = false
-    @Published var avoidTolls = false
+    @Published var selfTestLines: [String] = []
+    @Published var opts = TestOptions() { didSet { session.options = opts; saveSettings() } }
+    @Published var autoConnect = true { didSet { saveSettings() } }
+    @Published var avoidHighways = false { didSet { saveSettings() } }
+    @Published var avoidTolls = false { didSet { saveSettings() } }
+    @Published var assist = AssistSettings() { didSet { saveSettings() } }
     @Published var gpsText = "–"
 
+    // Navigace
+    @Published var selectedPlace: Place? = nil
+    @Published var destination: Place? = nil
+    @Published var guidance: NavSnapshot? = nil
+    @Published var routeSummary = ""
+    @Published var routeSteps: [String] = []
+    @Published var routeCoords: [CLLocationCoordinate2D] = []
+    @Published var routeVersion = 0
+    @Published var calculating = false
+    @Published var recenterToken = 0
+    @Published var toast: String? = nil
+
+    let places = PlacesStore()
+    let completer = SearchCompleter()
     let navigator = Navigator()
     let snapshots = MapSnapshotProvider()
     lazy var session = DashSession(navigator: navigator, snapshots: snapshots)
     private let location = LocationService()
-    private var destination: MKMapItem?
     private var lastGpsUI = Date.distantPast
+    private var bag = Set<AnyCancellable>()
+
+    var currentLocation: CLLocation? { location.last }
+    var bikeConnected: Bool { status.phase == "Spojeno" }
+    var version: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?" }
 
     init() {
-        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        log("NaviTest \(v) spuštěn, iOS \(UIDevice.current.systemVersion)")
+        log("NaviTest \(version) spuštěn, iOS \(UIDevice.current.systemVersion)")
+        let saved = SavedSettings.load()
+        opts = saved.opts
+        autoConnect = saved.autoConnect
+        avoidHighways = saved.avoidHighways
+        avoidTolls = saved.avoidTolls
+        assist = saved.assist
         session.options = opts
+
+        // Změny v místech a našeptávači překreslí i obrazovky navázané na AppModel
+        places.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        completer.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+
         session.onStatus = { [weak self] s in DispatchQueue.main.async { self?.status = s } }
         session.onBikeCommand = { [weak self] svc in self?.bikeCommand(svc) }
+        session.onBikeNavigate = { [weak self] fav in self?.navigateFromBike(fav) }
         navigator.onReroute = { [weak self] loc in self?.reroute(from: loc) }
 
         let t = NL.selfTest()
         selfTestSummary = "\(t.passed)/\(t.total) \(t.passed == t.total ? "OK" : "CHYBA")"
+        selfTestLines = t.lines
         log("Self-test protokolu: \(selfTestSummary)")
         t.lines.filter { $0.hasPrefix("❌") }.forEach { log("   \($0)") }
 
@@ -83,12 +156,13 @@ final class AppModel: ObservableObject {
             self.navigator.update(loc)
             if Date().timeIntervalSince(self.lastGpsUI) > 1 {
                 self.lastGpsUI = Date()
-                let kmh = max(0, loc.speed * 3.6)
-                self.gpsText = String(format: "±%.0f m · %.0f km/h · kurz %.0f°", loc.horizontalAccuracy, kmh, max(0, loc.course))
+                self.gpsText = String(format: "±%.0f m · %.0f km/h · kurz %.0f°",
+                                      loc.horizontalAccuracy, max(0, loc.speed * 3.6), max(0, loc.course))
             }
         }
         location.start()
-        _ = TileStore.shared   // zjistí aktuální adresu mapových dlaždic
+        _ = TileStore.shared
+        pushBikeFavorites()
 
         EAAccessoryManager.shared().registerForLocalNotifications()
         NotificationCenter.default.addObserver(forName: .EAAccessoryDidConnect, object: nil, queue: .main) { [weak self] n in
@@ -111,50 +185,114 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Nastavení
+    private func saveSettings() {
+        var s = SavedSettings()
+        s.opts = opts
+        s.autoConnect = autoConnect
+        s.avoidHighways = avoidHighways
+        s.avoidTolls = avoidTolls
+        s.assist = assist
+        s.save()
+    }
+
+    /// Tovární nastavení: nastavení, oblíbená místa i historie (mapová data v telefonu zůstávají).
+    func factoryReset() {
+        UserDefaults.standard.removeObject(forKey: SavedSettings.key)
+        let d = SavedSettings()
+        opts = d.opts
+        autoConnect = d.autoConnect
+        avoidHighways = d.avoidHighways
+        avoidTolls = d.avoidTolls
+        assist = d.assist
+        places.clearAll()
+        pushBikeFavorites()
+        session.resetZoom()
+        log("♻️ Obnoveno tovární nastavení")
+        flash("Obnoveno tovární nastavení")
+    }
+
     func refreshAccessories() {
         accessories = EAAccessoryManager.shared().connectedAccessories.map { DashLink.describe($0) }
     }
 
-    // MARK: Hledání cíle
-    func search() {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return }
-        let req = MKLocalSearch.Request()
-        req.naturalLanguageQuery = q
-        if let loc = location.last {
-            req.region = MKCoordinateRegion(center: loc.coordinate, latitudinalMeters: 100_000, longitudinalMeters: 100_000)
-        }
-        searching = true
-        MKLocalSearch(request: req).start { [weak self] resp, err in
-            guard let self = self else { return }
-            self.searching = false
-            if let err = err { log("❌ Hledání: \(err.localizedDescription)"); self.results = []; return }
-            self.results = Array((resp?.mapItems ?? []).prefix(8))
-            log("🔎 „\(q)“: \(self.results.count) výsledků")
+    func flash(_ text: String) {
+        toast = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            if self?.toast == text { self?.toast = nil }
         }
     }
 
-    static func describe(_ item: MKMapItem) -> String {
-        let p = item.placemark
-        let parts = [p.thoroughfare.map { t in [t, p.subThoroughfare].compactMap { $0 }.joined(separator: " ") }, p.locality]
-        return parts.compactMap { $0 }.joined(separator: ", ")
+    // MARK: Hledání
+    func select(_ s: Suggestion) {
+        if let p = s.place { selectedPlace = p; return }
+        guard let c = s.completion else { return }
+        MKLocalSearch(request: MKLocalSearch.Request(completion: c)).start { [weak self] resp, err in
+            guard let self = self else { return }
+            guard let item = resp?.mapItems.first else {
+                log("❌ Místo se nepodařilo dohledat: \(err?.localizedDescription ?? "?")")
+                self.flash("Místo se nepodařilo najít")
+                return
+            }
+            var p = Place.from(item)
+            p.name = s.title
+            if !s.subtitle.isEmpty { p.subtitle = s.subtitle }
+            self.selectedPlace = p
+        }
+    }
+
+    func distanceText(to p: Place) -> String? {
+        guard let here = currentLocation else { return nil }
+        let d = here.distance(from: CLLocation(latitude: p.lat, longitude: p.lon))
+        return d < 1000 ? "\(Int(d / 10) * 10) m vzdušnou čarou" : String(format: "%.1f km vzdušnou čarou", d / 1000)
+    }
+
+    // MARK: Oblíbená místa
+    func setHome(_ p: Place) { places.setHome(p); pushBikeFavorites(); flash("Uloženo jako Domů") }
+    func setWork(_ p: Place) { places.setWork(p); pushBikeFavorites(); flash("Uloženo jako Práce") }
+    func addFavorite(_ p: Place) { places.addFavorite(p); pushBikeFavorites(); flash("Přidáno do oblíbených") }
+    func removePlace(_ p: Place) { places.remove(p); pushBikeFavorites() }
+    func clearHistory() { places.clearHistory(); pushBikeFavorites() }
+
+    /// Seznam pro přístrojovku: Domů, Práce, oblíbené, pak poslední cíle.
+    private func pushBikeFavorites() {
+        var list: [BikeFav] = []
+        if let h = places.home { list.append(BikeFav(name: "Domů", coordinate: h.coordinate, tag: "home")) }
+        if let w = places.work { list.append(BikeFav(name: "Práce", coordinate: w.coordinate, tag: "work")) }
+        for p in places.others { list.append(BikeFav(name: p.name, coordinate: p.coordinate, tag: p.id.uuidString)) }
+        for p in places.history.prefix(5) { list.append(BikeFav(name: p.name, coordinate: p.coordinate, tag: p.id.uuidString)) }
+        session.setBikeFavorites(list, home: places.home != nil, office: places.work != nil)
     }
 
     // MARK: Trasa
-    func navigate(to item: MKMapItem) {
-        destination = item
-        results = []
+    private var destinationItem: MKMapItem?
+
+    func navigate(to p: Place) {
+        places.addHistory(p)
+        pushBikeFavorites()
+        destination = p
+        selectedPlace = nil
+        destinationItem = p.mapItem
+        if opts.navSource != .real { opts.navSource = .real }
         calculate(from: MKMapItem.forCurrentLocation(), reason: "nová trasa")
     }
 
+    private func navigateFromBike(_ fav: BikeFav) {
+        let all = places.favorites + places.history
+        if fav.tag == "home", let h = places.home { navigate(to: h) }
+        else if fav.tag == "work", let w = places.work { navigate(to: w) }
+        else if let p = all.first(where: { $0.id.uuidString == fav.tag }) { navigate(to: p) }
+        else { navigate(to: Place(kind: .history, name: fav.name, subtitle: "", lat: fav.coordinate.latitude, lon: fav.coordinate.longitude)) }
+    }
+
     private func reroute(from loc: CLLocation) {
-        guard destination != nil, !calculating else { return }
+        guard destinationItem != nil, !calculating else { return }
         log("↪️ Sjetí z trasy – přepočítávám…")
         calculate(from: MKMapItem(placemark: MKPlacemark(coordinate: loc.coordinate)), reason: "přepočet")
     }
 
     private func calculate(from source: MKMapItem, reason: String) {
-        guard let dest = destination else { return }
+        guard let dest = destinationItem else { return }
         let req = MKDirections.Request()
         req.source = source
         req.destination = dest
@@ -163,16 +301,19 @@ final class AppModel: ObservableObject {
         req.highwayPreference = avoidHighways ? .avoid : .any
         req.tollPreference = avoidTolls ? .avoid : .any
         calculating = true
-        let name = dest.name ?? "Cíl"
+        let name = destination?.name ?? dest.name ?? "Cíl"
         MKDirections(request: req).calculate { [weak self] resp, err in
             guard let self = self else { return }
             self.calculating = false
             guard let route = resp?.routes.first else {
                 log("❌ Trasa (\(reason)): \(err?.localizedDescription ?? "žádná trasa")")
+                self.flash("Trasu se nepodařilo spočítat")
                 return
             }
             let r = NavRoute(route: route, destinationName: name)
             self.navigator.setRoute(r)
+            self.routeCoords = r.points.map { $0.coordinate }
+            self.routeVersion += 1
             self.routeSummary = String(format: "%@ · %.1f km · %.0f min · %ld manévrů",
                                        name, r.total / 1000, route.expectedTravelTime / 60, r.maneuvers.count)
             self.routeSteps = r.maneuvers.map { m in
@@ -184,208 +325,75 @@ final class AppModel: ObservableObject {
             for s in self.routeSteps { log("   \(s)") }
             let n = TileStore.shared.prefetchRoute(r.points)
             log("🗺️ Předstahuji \(n) mapových dlaždic podél trasy")
-            if self.opts.navSource != .real { self.opts.navSource = .real }
+            self.refreshGuidance()
         }
     }
 
     func endNavigation() {
+        destinationItem = nil
         destination = nil
         navigator.setRoute(nil)
         routeSummary = ""
         routeSteps = []
+        routeCoords = []
+        routeVersion += 1
+        guidance = nil
         log("🛑 Navigace ukončena")
+    }
+
+    func refreshGuidance() {
+        guidance = navigator.hasRoute ? navigator.snapshot() : nil
     }
 
     private func bikeCommand(_ svc: UInt8) {
         switch svc {
-        case 49: if destination != nil { endNavigation() }
+        case 49:
+            if destination != nil { endNavigation() }
+        case 53:
+            if let h = places.home { navigate(to: h) } else { log("⚠️ Motorka chce domů, ale Domov není nastaven") }
+        case 54:
+            if let w = places.work { navigate(to: w) } else { log("⚠️ Motorka chce do práce, ale Práce není nastavena") }
         default: break
         }
     }
 
-    // MARK: Test varování (formát přesně jako StreetCross)
+    // MARK: Test varování (formát i rušení přesně jako StreetCross)
+    enum WarnKind: Int { case camera, school, border }
+    private var activeWarnings: [WarnKind: Int] = [:]
     private var warningToken = 0
 
     func testWarning(_ kind: Int) {
         switch kind {
-        case 0: showWarning(NL.speedCamera(limit: "50 km/h", distance: "300 m", cameraType: 0, show: true), clear: NL.speedCameraClear())
-        case 1: showWarning(NL.speedCamera(limit: "90 km/h", distance: "1.2 km", cameraType: 3, show: true), clear: NL.speedCameraClear())
-        case 2: showWarning(NL.speedCamera(limit: "50 km/h", distance: "150 m", cameraType: 5, show: true), clear: NL.speedCameraClear())
-        case 3: showWarning(NL.speedCamera(limit: "50 km/h", distance: "400 m", cameraType: 2, show: true), clear: NL.speedCameraClear())
-        case 4: showWarning(NL.schoolZone(distance: "200 m", show: true), clear: NL.schoolZone(distance: "", show: false))
-        case 5: showWarning(NL.border(country: true, distance: "2 km", show: true), clear: NL.border(country: true, distance: "", show: false))
+        case 0: showWarning(.camera, NL.speedCamera(limit: "50 km/h", distance: "300 m", cameraType: 0, show: true))
+        case 1: showWarning(.camera, NL.speedCamera(limit: "90 km/h", distance: "1.2 km", cameraType: 3, show: true))
+        case 2: showWarning(.camera, NL.speedCamera(limit: "50 km/h", distance: "150 m", cameraType: 5, show: true))
+        case 3: showWarning(.camera, NL.speedCamera(limit: "50 km/h", distance: "400 m", cameraType: 2, show: true))
+        case 4: showWarning(.school, NL.schoolZone(distance: "200 m", show: true))
+        case 5: showWarning(.border, NL.border(country: true, distance: "2 km"))
         case 6: session.enqueue([NL.speedingEvent()])
         default:
-            warningToken += 1
-            session.enqueue([NL.speedCameraClear(),
-                             NL.schoolZone(distance: "", show: false),
-                             NL.border(country: true, distance: "", show: false),
-                             NL.naviEvent(type: 1, text: "", show: false)])
+            for k in Array(activeWarnings.keys) { clearWarning(k) }
         }
     }
 
-    /// Ukáže varování a za 12 s ho zase schová (když mezitím nepřišlo jiné).
-    private func showWarning(_ m: NLMessage, clear: NLMessage) {
+    private func showWarning(_ kind: WarnKind, _ m: NLMessage) {
         warningToken += 1
         let token = warningToken
+        activeWarnings[kind] = token
         session.enqueue([m])
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
-            guard let self = self, self.warningToken == token else { return }
-            self.session.enqueue([clear])
-        }
-    }
-}
-
-// MARK: - UI
-struct ContentView: View {
-    @EnvironmentObject var m: AppModel
-    @ObservedObject var logs = Log.shared
-    @Environment(\.scenePhase) private var phase
-
-    var body: some View {
-        NavigationStack {
-            List {
-                statusSection
-                navigationSection
-                mapSection
-                sendSection
-                warningSection
-                controlSection
-                Section("Příslušenství (MFi)") {
-                    if m.accessories.isEmpty { Text("žádné").foregroundStyle(.secondary) }
-                    ForEach(m.accessories, id: \.self) { Text($0).font(.caption) }
-                    Button("Obnovit") { m.refreshAccessories() }
-                }
-                Section("Log") {
-                    ShareLink(item: Log.shared.fileURL) { Label("Exportovat celý log", systemImage: "square.and.arrow.up") }
-                    ForEach(Array(logs.lines.enumerated().reversed()), id: \.offset) { item in
-                        Text(item.element).font(.system(size: 11, design: .monospaced))
-                    }
-                }
-            }
-            .navigationTitle("NaviTest R9")
-        }
-        .onChange(of: phase) { p in
-            switch p {
-            case .background: log("📱 Aplikace na pozadí")
-            case .active: log("📱 Aplikace aktivní")
-            case .inactive: log("📱 Aplikace neaktivní")
-            @unknown default: break
-            }
+            guard let self = self, self.activeWarnings[kind] == token else { return }
+            self.clearWarning(kind)
         }
     }
 
-    private var statusSection: some View {
-        Section("Stav") {
-            row("Spojení", m.status.phase)
-            row("Přístrojovka", "\(m.status.partNumber) · \(m.status.model.rawValue)")
-            row("Režim (dle motorky)", m.status.mode.rawValue)
-            row("Obrázky", String(format: "%.1f fps · %ld kB · potvrzeno %ld",
-                                  m.status.fps, m.status.lastKB, m.status.imagesAcked))
-            row("Zoom", m.status.zoomText)
-            row("Mapa", m.status.mapStats.isEmpty ? "–" : m.status.mapStats)
-            row("GPS", m.gpsText)
-            row("Self-test", m.selfTestSummary)
+    private func clearWarning(_ kind: WarnKind) {
+        guard activeWarnings.removeValue(forKey: kind) != nil else { return }
+        switch kind {
+        case .camera: session.enqueue([NL.speedCameraClear()])
+        case .school: session.enqueue([NL.schoolZoneClear()])
+        case .border: session.enqueue([NL.borderClear()])
         }
-    }
-
-    private var navigationSection: some View {
-        Section("Navigace") {
-            Picker("Zdroj", selection: $m.opts.navSource) {
-                ForEach(NavSource.allCases) { Text($0.label).tag($0) }
-            }.pickerStyle(.segmented)
-            HStack {
-                TextField("Kam jedeme?", text: $m.query)
-                    .textInputAutocapitalization(.never)
-                    .submitLabel(.search)
-                    .onSubmit { m.search() }
-                Button(m.searching ? "…" : "Hledat") { m.search() }
-            }
-            ForEach(m.results, id: \.self) { item in
-                Button {
-                    m.navigate(to: item)
-                } label: {
-                    VStack(alignment: .leading) {
-                        Text(item.name ?? "?")
-                        Text(AppModel.describe(item)).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            Toggle("Vyhnout se dálnicím", isOn: $m.avoidHighways)
-            Toggle("Vyhnout se placeným úsekům", isOn: $m.avoidTolls)
-            if m.calculating { Text("Počítám trasu…").foregroundStyle(.secondary) }
-            if !m.routeSummary.isEmpty {
-                Text(m.routeSummary).font(.callout.bold())
-                ForEach(Array(m.routeSteps.enumerated()), id: \.offset) { s in
-                    Text(s.element).font(.caption)
-                }
-                Button("Ukončit navigaci", role: .destructive) { m.endNavigation() }
-            }
-        }
-    }
-
-    private var mapSection: some View {
-        Section {
-            Picker("Podklad", selection: $m.opts.mapSource) {
-                ForEach(MapSource.allCases) { Text($0.label).tag($0) }
-            }.pickerStyle(.segmented)
-            Toggle("Šipka a vzdálenost v obrázku", isOn: $m.opts.turnBox)
-            Toggle("Sever nahoře (jinak po směru jízdy)", isOn: $m.opts.northUp)
-            Toggle("Tmavá mapa", isOn: $m.opts.darkMap)
-        } header: {
-            Text("Mapa v motorce")
-        } footer: {
-            Text("Mapová data © přispěvatelé OpenStreetMap, dlaždice OpenFreeMap a © OpenMapTiles. Apple mapa funguje jen s odemčeným telefonem.")
-        }
-    }
-
-    private var sendSection: some View {
-        Section("Co posílat") {
-            Toggle("Obrázky mapy", isOn: $m.opts.sendImages)
-            Toggle("Navigační data (šipky, vzdálenost)", isOn: $m.opts.sendNavData)
-            Picker("Navigační služba", selection: $m.opts.navService) {
-                ForEach(NavServiceChoice.allCases) { Text($0.label).tag($0) }
-            }.pickerStyle(.segmented)
-            Stepper("Obrázky: \(Int(m.opts.imageFps)) fps", value: $m.opts.imageFps, in: 1...6, step: 1)
-            VStack(alignment: .leading) {
-                Text("Kvalita JPEG: \(Int(m.opts.jpegQuality * 100)) %")
-                Slider(value: $m.opts.jpegQuality, in: 0.2...0.9, step: 0.05)
-            }
-        }
-    }
-
-    private var warningSection: some View {
-        Section("Varování (test)") {
-            HStack {
-                Button("Radar 50") { m.testWarning(0) }.buttonStyle(.bordered)
-                Button("Úsekové 90") { m.testWarning(1) }.buttonStyle(.bordered)
-                Button("Červená") { m.testWarning(2) }.buttonStyle(.bordered)
-            }
-            HStack {
-                Button("Mobilní") { m.testWarning(3) }.buttonStyle(.bordered)
-                Button("Škola") { m.testWarning(4) }.buttonStyle(.bordered)
-                Button("Hranice") { m.testWarning(5) }.buttonStyle(.bordered)
-            }
-            HStack {
-                Button("Rychlost") { m.testWarning(6) }.buttonStyle(.bordered)
-                Button("Zrušit vše", role: .destructive) { m.testWarning(9) }.buttonStyle(.bordered)
-            }
-        }
-    }
-
-    private var controlSection: some View {
-        Section("Ovládání") {
-            HStack {
-                Button("Připojit") { m.session.start() }.buttonStyle(.borderedProminent)
-                Spacer()
-                Button("Odpojit", role: .destructive) { m.session.stop() }.buttonStyle(.bordered)
-            }
-            Toggle("Auto-připojení k motorce", isOn: $m.autoConnect)
-        }
-    }
-
-    private func row(_ k: String, _ v: String) -> some View {
-        HStack { Text(k); Spacer(); Text(v).foregroundStyle(.secondary).multilineTextAlignment(.trailing) }
     }
 }
 
@@ -393,6 +401,6 @@ struct ContentView: View {
 struct NaviTestApp: App {
     @StateObject private var model = AppModel()
     var body: some Scene {
-        WindowGroup { ContentView().environmentObject(model) }
+        WindowGroup { MainView().environmentObject(model) }
     }
 }
