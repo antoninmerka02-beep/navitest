@@ -163,6 +163,21 @@ enum NL {
     }
     static func imageStopped() -> NLMessage { .init(svc: 20, pdt: pdtValue, payload: []) }
 
+    // MARK: Varování (služba 9) – přístrojovka je zobrazí nativně
+    /// Typ události: 0 doprava, 1 rychlost, 2 radar, 3 hranice, 4 škola, 5 jiné. Podtyp 126 = nedefinováno.
+    static func naviEvent(type: UInt8, text: String, show: Bool, subType: UInt8 = 126) -> NLMessage {
+        let t = utf8Capped(text)
+        var w = ByteWriter()
+        w.u8(Int(type)); w.u8(Int(subType)); w.u8(show ? 1 : 0); w.u8(t.count); w.raw(t)
+        return .init(svc: 9, pdt: pdtPointer, payload: w.b)
+    }
+    /// Radar: Garmin posílá text ve tvaru "název;limit" s typem 2. Zrušení = prázdné texty a show=false.
+    static func speedCamera(name: String, limit: String, show: Bool) -> NLMessage {
+        naviEvent(type: 2, text: "\(name);\(limit)", show: show)
+    }
+    /// Překročení rychlosti – Garmin posílá typ 1 s prázdným textem.
+    static func speedingEvent() -> NLMessage { naviEvent(type: 1, text: "", show: true) }
+
     // MARK: Jména služeb do logu
     static func name(_ svc: UInt8) -> String {
         switch svc {
@@ -231,6 +246,10 @@ enum NL {
             ("CUR_ROAD (3)", currentRoad("Zlínská"), "5a6cc3ad6e736bc3a1"),
             ("ZOOM (14)", zoom(current: 7, lo: 0, hi: 25, label: "200 m", show: true), "07190501323030206d"),
             ("IMAGE (0)", image(seq: 258, jpeg: [0xFF, 0xD8, 0xFF, 0xD9]), "030201ffd8ffd9"),
+            ("RADAR (9)", speedCamera(name: "Radar", limit: "50", show: true), "027e010852616461723b3530"),
+            ("RADAR zrušit (9)", speedCamera(name: "", limit: "", show: false), "027e00013b"),
+            ("RYCHLOST (9)", speedingEvent(), "017e0100"),
+            ("ŠKOLA (9)", naviEvent(type: 4, text: "Škola", show: true), "047e0106c5a06b6f6c61"),
         ]
         var lines: [String] = []
         var ok = 0

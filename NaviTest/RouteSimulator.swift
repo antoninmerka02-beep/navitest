@@ -1,79 +1,65 @@
 import Foundation
 
-/// Falešná trasa po Zlíně – jen aby bylo co posílat. Jede „50 km/h“ a dokola.
+/// Falešná trasa – jede „50 km/h“ dokola, aby bylo co posílat i bez skutečné trasy.
 struct SimManeuver {
-    let icon: UInt8        // Garmin TurnArrowIconType ordinal
-    let road: String       // ulice, na kterou se odbočuje
-    let length: Double     // metry od předchozího manévru
-    let text: String       // text pro turn-by-turn seznam
-    let lanes: [UInt8]     // 1 rovně, 2/3 šikmo P/L, 4/5 vpravo/vlevo, 7–12 = šedé (nedoporučené)
-}
-
-struct SimSnapshot {
-    let maneuver: SimManeuver
-    let toNext: Double
-    let remaining: Double
-    let minutesLeft: Int
-    let currentRoad: String
-    let speedLimit: Float
-    let eta: (hour: Int, minute: Int)
-    let upcoming: [(SimManeuver, Double)]   // manévr + vzdálenost od aktuální polohy
-    let index: Int
+    let icon: UInt8
+    let road: String
+    let length: Double
+    let text: String
+    let lanes: [UInt8]   // 1 rovně, 2/3 šikmo P/L, 4/5 vpravo/vlevo, 7–12 = šedé (nedoporučené)
 }
 
 final class RouteSimulator {
     let route: [SimManeuver] = [
-        .init(icon: 34, road: "Třída Tomáše Bati", length: 600, text: "Vlevo na Třídu Tomáše Bati", lanes: [3, 7, 7]),
-        .init(icon: 35, road: "Zarámí", length: 450, text: "Vpravo na Zarámí", lanes: []),
-        .init(icon: 14, road: "Gahurova", length: 700, text: "Kruhový objezd, 2. výjezd", lanes: []),
-        .init(icon: 8, road: "Dlouhá", length: 900, text: "Pokračujte rovně", lanes: [1, 1]),
-        .init(icon: 6, road: "R49", length: 1500, text: "Držte se vlevo na R49", lanes: [3, 9]),
-        .init(icon: 36, road: "Otočka", length: 400, text: "Otočte se", lanes: []),
-        .init(icon: 0, road: "Cíl", length: 800, text: "Cíl", lanes: []),
+        .init(icon: TurnIcon.turnL, road: "Třída Tomáše Bati", length: 600, text: "Vlevo na Třídu Tomáše Bati", lanes: [3, 7, 7]),
+        .init(icon: TurnIcon.turnR, road: "Zarámí", length: 450, text: "Vpravo na Zarámí", lanes: []),
+        .init(icon: TurnIcon.roundabout, road: "2. výjezd · Gahurova", length: 700, text: "Kruhový objezd, 2. výjezd", lanes: []),
+        .init(icon: TurnIcon.straight, road: "Dlouhá", length: 900, text: "Pokračujte rovně", lanes: [1, 1]),
+        .init(icon: TurnIcon.keepL, road: "R49", length: 1500, text: "Držte se vlevo na R49", lanes: [3, 9]),
+        .init(icon: TurnIcon.exitR, road: "Otrokovice", length: 1200, text: "Sjeďte vpravo", lanes: [7, 2]),
+        .init(icon: TurnIcon.uturnL, road: "Otočka", length: 400, text: "Otočte se", lanes: []),
+        .init(icon: TurnIcon.arrivingR, road: "Cíl", length: 800, text: "Cíl je vpravo", lanes: []),
     ]
-    let speed = 13.9 // m/s ≈ 50 km/h
     private(set) var index = 0
     private(set) var toNext: Double
+    private var speed = 13.9          // m/s ≈ 50 km/h
+    private var phase = 0.0
 
     init() { toNext = route[0].length }
 
     func tick(_ dt: Double) {
-        toNext -= speed * max(0, min(dt, 5))
+        let d = max(0, min(dt, 5))
+        // Posledních 150 m před odbočkou zpomalí, ať jsou na displeji vidět i malé vzdálenosti.
+        speed = toNext < 150 ? 5.0 : 13.9
+        toNext -= speed * d
+        phase += d
         if toNext <= 0 {
             index = (index + 1) % route.count
             toNext = route[index].length
         }
     }
 
-    func snapshot() -> SimSnapshot {
+    func snapshot() -> NavSnapshot {
+        var s = NavSnapshot()
+        let m = route[index]
+        s.icon = m.icon; s.toNext = toNext; s.road = m.road; s.text = m.text; s.lanes = m.lanes
         var remaining = toNext
-        var upcoming: [(SimManeuver, Double)] = [(route[index], toNext)]
+        var items: [UpcomingItem] = [UpcomingItem(icon: m.icon, dist: toNext, text: m.text)]
         var acc = toNext
         if index + 1 < route.count {
-            for m in route[(index + 1)...] {
-                remaining += m.length
-                acc += m.length
-                upcoming.append((m, acc))
+            for n in route[(index + 1)...] {
+                remaining += n.length; acc += n.length
+                items.append(UpcomingItem(icon: n.icon, dist: acc, text: n.text))
             }
         }
-        let minutes = Int((remaining / speed / 60).rounded(.up))
-        let eta = Calendar.current.dateComponents([.hour, .minute], from: Date().addingTimeInterval(remaining / speed))
-        return SimSnapshot(
-            maneuver: route[index],
-            toNext: toNext,
-            remaining: remaining,
-            minutesLeft: minutes,
-            currentRoad: index == 0 ? "Zlínská" : route[index - 1].road,
-            speedLimit: index % 2 == 0 ? 50 : 90,
-            eta: (eta.hour ?? 0, eta.minute ?? 0),
-            upcoming: Array(upcoming.prefix(5)),
-            index: index
-        )
+        s.remaining = remaining
+        let secs = remaining / 13.9
+        s.minutesLeft = Int((secs / 60).rounded(.up))
+        (s.etaHour, s.etaMinute) = etaComponents(secondsFromNow: secs)
+        s.currentRoad = index == 0 ? "Zlínská" : route[index - 1].road
+        s.speedLimit = index % 2 == 0 ? 50 : 90
+        s.upcoming = Array(items.prefix(5))
+        s.maneuverIndex = index
+        return s
     }
-}
-
-/// Vzdálenost na hodnotu + jednotku tak, jak to dělá StreetCross (m pod 1 km, jinak km).
-func formatDistance(_ meters: Double) -> (Float, String) {
-    if meters < 1000 { return (Float((meters / 10).rounded() * 10), "m") }
-    return (Float((meters / 100).rounded() / 10), "km")
 }
