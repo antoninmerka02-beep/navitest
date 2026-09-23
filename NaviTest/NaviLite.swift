@@ -171,9 +171,18 @@ enum NL {
         w.u8(Int(type)); w.u8(Int(subType)); w.u8(show ? 1 : 0); w.u8(t.count); w.raw(t)
         return .init(svc: 9, pdt: pdtPointer, payload: w.b)
     }
-    /// Radar: Garmin posílá text ve tvaru "název;limit" s typem 2. Zrušení = prázdné texty a show=false.
-    static func speedCamera(name: String, limit: String, show: Bool) -> NLMessage {
-        naviEvent(type: 2, text: "\(name);\(limit)", show: show)
+    /// Radar přesně jako StreetCross: text "limit;vzdálenost" (např. "50 km/h;300 m"),
+    /// podtyp = druh radaru: 0 pevný, 1 dočasný, 2 mobilní, 3 úsekové, 4 proměnný, 5 červená, 7 mobilní zóna.
+    static func speedCamera(limit: String, distance: String, cameraType: UInt8, show: Bool) -> NLMessage {
+        naviEvent(type: 2, text: "\(limit);\(distance)", show: show, subType: cameraType)
+    }
+    /// Zrušení radaru – přesně jako StreetCross ("" ; "" s podtypem 126).
+    static func speedCameraClear() -> NLMessage { naviEvent(type: 2, text: ";", show: false) }
+    /// Škola: přístrojovka sama kreslí „School Zone“, text je jen vzdálenost.
+    static func schoolZone(distance: String, show: Bool) -> NLMessage { naviEvent(type: 4, text: distance, show: show) }
+    /// Hranice: podtyp 42 = stát, 41 = region; text je vzdálenost.
+    static func border(country: Bool, distance: String, show: Bool) -> NLMessage {
+        naviEvent(type: 3, text: distance, show: show, subType: country ? 42 : 41)
     }
     /// Překročení rychlosti – Garmin posílá typ 1 s prázdným textem.
     static func speedingEvent() -> NLMessage { naviEvent(type: 1, text: "", show: true) }
@@ -246,10 +255,12 @@ enum NL {
             ("CUR_ROAD (3)", currentRoad("Zlínská"), "5a6cc3ad6e736bc3a1"),
             ("ZOOM (14)", zoom(current: 7, lo: 0, hi: 25, label: "200 m", show: true), "07190501323030206d"),
             ("IMAGE (0)", image(seq: 258, jpeg: [0xFF, 0xD8, 0xFF, 0xD9]), "030201ffd8ffd9"),
-            ("RADAR (9)", speedCamera(name: "Radar", limit: "50", show: true), "027e010852616461723b3530"),
-            ("RADAR zrušit (9)", speedCamera(name: "", limit: "", show: false), "027e00013b"),
+            ("RADAR úsekové (9)", speedCamera(limit: "90 km/h", distance: "1.2 km", cameraType: 3, show: true), "0203010e3930206b6d2f683b312e32206b6d"),
+            ("RADAR červená (9)", speedCamera(limit: "50 km/h", distance: "", cameraType: 5, show: true), "020501083530206b6d2f683b"),
+            ("RADAR zrušit (9)", speedCameraClear(), "027e00013b"),
+            ("ŠKOLA 200 m (9)", schoolZone(distance: "200 m", show: true), "047e0105323030206d"),
+            ("HRANICE (9)", naviEvent(type: 3, text: "2 km", show: true, subType: 0), "0300010432206b6d"),
             ("RYCHLOST (9)", speedingEvent(), "017e0100"),
-            ("ŠKOLA (9)", naviEvent(type: 4, text: "Škola", show: true), "047e0106c5a06b6f6c61"),
         ]
         var lines: [String] = []
         var ok = 0

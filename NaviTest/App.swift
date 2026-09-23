@@ -88,6 +88,7 @@ final class AppModel: ObservableObject {
             }
         }
         location.start()
+        _ = TileStore.shared   // zjistí aktuální adresu mapových dlaždic
 
         EAAccessoryManager.shared().registerForLocalNotifications()
         NotificationCenter.default.addObserver(forName: .EAAccessoryDidConnect, object: nil, queue: .main) { [weak self] n in
@@ -181,6 +182,8 @@ final class AppModel: ObservableObject {
             }
             log("🧭 Trasa (\(reason)): \(self.routeSummary)")
             for s in self.routeSteps { log("   \(s)") }
+            let n = TileStore.shared.prefetchRoute(r.points)
+            log("🗺️ Předstahuji \(n) mapových dlaždic podél trasy")
             if self.opts.navSource != .real { self.opts.navSource = .real }
         }
     }
@@ -200,29 +203,35 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Test varování
+    // MARK: Test varování (formát přesně jako StreetCross)
+    private var warningToken = 0
+
     func testWarning(_ kind: Int) {
         switch kind {
-        case 0:
-            session.enqueue([NL.speedCamera(name: "Radar", limit: "50", show: true)])
-            clearWarningLater()
-        case 1:
-            session.enqueue([NL.speedCamera(name: "Úsekové měření", limit: "90", show: true)])
-            clearWarningLater()
-        case 2:
-            session.enqueue([NL.speedingEvent()])
-        case 3:
-            session.enqueue([NL.naviEvent(type: 4, text: "Škola", show: true)])
+        case 0: showWarning(NL.speedCamera(limit: "50 km/h", distance: "300 m", cameraType: 0, show: true), clear: NL.speedCameraClear())
+        case 1: showWarning(NL.speedCamera(limit: "90 km/h", distance: "1.2 km", cameraType: 3, show: true), clear: NL.speedCameraClear())
+        case 2: showWarning(NL.speedCamera(limit: "50 km/h", distance: "150 m", cameraType: 5, show: true), clear: NL.speedCameraClear())
+        case 3: showWarning(NL.speedCamera(limit: "50 km/h", distance: "400 m", cameraType: 2, show: true), clear: NL.speedCameraClear())
+        case 4: showWarning(NL.schoolZone(distance: "200 m", show: true), clear: NL.schoolZone(distance: "", show: false))
+        case 5: showWarning(NL.border(country: true, distance: "2 km", show: true), clear: NL.border(country: true, distance: "", show: false))
+        case 6: session.enqueue([NL.speedingEvent()])
         default:
-            session.enqueue([NL.speedCamera(name: "", limit: "", show: false),
-                             NL.naviEvent(type: 1, text: "", show: false),
-                             NL.naviEvent(type: 4, text: "", show: false)])
+            warningToken += 1
+            session.enqueue([NL.speedCameraClear(),
+                             NL.schoolZone(distance: "", show: false),
+                             NL.border(country: true, distance: "", show: false),
+                             NL.naviEvent(type: 1, text: "", show: false)])
         }
     }
 
-    private func clearWarningLater() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
-            self?.session.enqueue([NL.speedCamera(name: "", limit: "", show: false)])
+    /// Ukáže varování a za 12 s ho zase schová (když mezitím nepřišlo jiné).
+    private func showWarning(_ m: NLMessage, clear: NLMessage) {
+        warningToken += 1
+        let token = warningToken
+        session.enqueue([m])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+            guard let self = self, self.warningToken == token else { return }
+            self.session.enqueue([clear])
         }
     }
 }
@@ -271,10 +280,10 @@ struct ContentView: View {
             row("Spojení", m.status.phase)
             row("Přístrojovka", "\(m.status.partNumber) · \(m.status.model.rawValue)")
             row("Režim (dle motorky)", m.status.mode.rawValue)
-            row("Obrázky", String(format: "%.1f fps · %ld kB · %ld px · potvrzeno %ld",
-                                  m.status.fps, m.status.lastKB, m.status.effectiveWidth, m.status.imagesAcked))
+            row("Obrázky", String(format: "%.1f fps · %ld kB · potvrzeno %ld",
+                                  m.status.fps, m.status.lastKB, m.status.imagesAcked))
             row("Zoom", m.status.zoomText)
-            row("Apple mapa", m.status.mapStats.isEmpty ? "–" : m.status.mapStats)
+            row("Mapa", m.status.mapStats.isEmpty ? "–" : m.status.mapStats)
             row("GPS", m.gpsText)
             row("Self-test", m.selfTestSummary)
         }
@@ -316,20 +325,17 @@ struct ContentView: View {
     }
 
     private var mapSection: some View {
-        Section("Mapa v motorce") {
+        Section {
             Picker("Podklad", selection: $m.opts.mapSource) {
                 ForEach(MapSource.allCases) { Text($0.label).tag($0) }
             }.pickerStyle(.segmented)
-            Picker("Typ obrázku", selection: $m.opts.imageType) {
-                Text("0 normální").tag(UInt8(0))
-                Text("3 rozšířená").tag(UInt8(3))
-                Text("1 křižovatka").tag(UInt8(1))
-            }.pickerStyle(.segmented)
-            Picker("Šířka", selection: $m.opts.imageWidth) {
-                ForEach([480, 560, 600, 640], id: \.self) { Text("\($0)").tag($0) }
-            }.pickerStyle(.segmented)
+            Toggle("Šipka a vzdálenost v obrázku", isOn: $m.opts.turnBox)
             Toggle("Sever nahoře (jinak po směru jízdy)", isOn: $m.opts.northUp)
             Toggle("Tmavá mapa", isOn: $m.opts.darkMap)
+        } header: {
+            Text("Mapa v motorce")
+        } footer: {
+            Text("Mapová data © přispěvatelé OpenStreetMap, dlaždice OpenFreeMap a © OpenMapTiles. Apple mapa funguje jen s odemčeným telefonem.")
         }
     }
 
@@ -352,11 +358,16 @@ struct ContentView: View {
         Section("Varování (test)") {
             HStack {
                 Button("Radar 50") { m.testWarning(0) }.buttonStyle(.bordered)
-                Button("Úsekové") { m.testWarning(1) }.buttonStyle(.bordered)
-                Button("Rychlost") { m.testWarning(2) }.buttonStyle(.bordered)
+                Button("Úsekové 90") { m.testWarning(1) }.buttonStyle(.bordered)
+                Button("Červená") { m.testWarning(2) }.buttonStyle(.bordered)
             }
             HStack {
-                Button("Škola") { m.testWarning(3) }.buttonStyle(.bordered)
+                Button("Mobilní") { m.testWarning(3) }.buttonStyle(.bordered)
+                Button("Škola") { m.testWarning(4) }.buttonStyle(.bordered)
+                Button("Hranice") { m.testWarning(5) }.buttonStyle(.bordered)
+            }
+            HStack {
+                Button("Rychlost") { m.testWarning(6) }.buttonStyle(.bordered)
                 Button("Zrušit vše", role: .destructive) { m.testWarning(9) }.buttonStyle(.bordered)
             }
         }

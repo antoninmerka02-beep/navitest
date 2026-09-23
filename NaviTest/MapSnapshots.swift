@@ -60,7 +60,11 @@ final class MapSnapshotProvider {
         o.mapType = .mutedStandard
         o.pointOfInterestFilter = .excludingAll
         o.showsBuildings = false
-        o.traitCollection = UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
+        // Vynutit měřítko 1 (iOS jinak vrátí obrázek v rozlišení displeje, např. 3×)
+        o.traitCollection = UITraitCollection(traitsFrom: [
+            UITraitCollection(displayScale: 1),
+            UITraitCollection(userInterfaceStyle: dark ? .dark : .light),
+        ])
 
         let state = UIApplication.shared.applicationState
         let stateName = state == .background ? "pozadí" : (state == .active ? "popředí" : "neaktivní")

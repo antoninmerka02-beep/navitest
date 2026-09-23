@@ -20,12 +20,6 @@ enum NavSource: String, CaseIterable, Identifiable {
     var label: String { self == .sim ? "Simulace" : "Skutečná" }
 }
 
-enum MapSource: String, CaseIterable, Identifiable {
-    case own, apple
-    var id: String { rawValue }
-    var label: String { self == .own ? "Vlastní" : "Apple mapa" }
-}
-
 struct TestOptions {
     var sendImages = true
     var sendNavData = true
@@ -33,9 +27,8 @@ struct TestOptions {
     var imageFps: Double = 2
     var jpegQuality: Double = 0.55
     var navSource: NavSource = .sim
-    var mapSource: MapSource = .apple
-    var imageType: UInt8 = 0          // 0 normální navigace, 1 křižovatka (JCV), 3 rozšířená
-    var imageWidth: Int = 480
+    var mapSource: MapSource = .vector
+    var turnBox = true                // vlastní šipka + vzdálenost v obrázku
     var northUp = false
     var darkMap = true
 }
@@ -62,7 +55,6 @@ struct SessionStatus {
     var lastKB = 0
     var navSent = 0
     var lastRx = "–"
-    var effectiveWidth = 480
     var zoomText = ""
     var mapStats = ""
 }
@@ -99,9 +91,7 @@ final class DashSession {
     private var lastTbtIndex = -1
     private var lastSpeedLog = Date.distantPast
     private var lastGuiding: Bool? = nil
-    private var widthFallback = false
-    private var lastLoggedWidth = 0
-    private var lastLoggedType: UInt8 = 255
+    private var lastLoggedSource: MapSource? = nil
 
     /// metrů na pixel pro jednotlivé úrovně zoomu
     private let mppTable: [Double] = [0.4, 0.6, 0.9, 1.3, 2, 3, 4.5, 6.5, 10, 15, 22, 33, 50, 75, 110, 160, 240]
@@ -148,7 +138,7 @@ final class DashSession {
         model = .unknown
         lastTbtIndex = -1
         lastGuiding = nil
-        widthFallback = false
+        lastLoggedSource = nil
         defer {
             link.close()
             setRunning(false)
@@ -253,33 +243,28 @@ final class DashSession {
                 if awaitingAck && now.timeIntervalSince(ackSentAt) > 3 {
                     awaitingAck = false
                     ackTimeouts += 1
-                    log("⚠️ IMAGE_ACK nepřišel do 3 s (\(ackTimeouts)× po sobě, šířka \(effectiveWidth(o)) px, typ \(o.imageType))")
-                    if ackTimeouts >= 3 && effectiveWidth(o) != 480 {
-                        widthFallback = true
-                        log("↩️ Přístrojovka šířku \(o.imageWidth) px nebere – vracím 480 px")
-                    }
+                    log("⚠️ IMAGE_ACK nepřišel do 3 s (\(ackTimeouts)× po sobě)")
                 }
                 if !awaitingAck && now.timeIntervalSince(lastImage) >= 1.0 / max(0.5, o.imageFps) {
-                    let w = effectiveWidth(o)
-                    if w != lastLoggedWidth || o.imageType != lastLoggedType {
-                        log("🖼️ Obrázky: šířka \(w) px, typ \(o.imageType) (\(imageTypeName(o.imageType)))")
-                        lastLoggedWidth = w
-                        lastLoggedType = o.imageType
+                    if o.mapSource != lastLoggedSource {
+                        log("🖼️ Podklad mapy: \(o.mapSource.label)")
+                        lastLoggedSource = o.mapSource
                     }
                     var p = RenderParams()
-                    p.width = w
                     p.quality = o.jpegQuality
                     p.mpp = mpp()
                     p.northUp = o.northUp
                     p.dark = o.darkMap
-                    p.note = "typ \(o.imageType)"
+                    p.mapSource = o.mapSource
+                    p.turnBox = o.turnBox
                     var snap: MapSnapshotProvider.Snap? = nil
                     if o.mapSource == .apple, let pos = nav?.position {
                         snapshots.ensure(center: pos, mpp: p.mpp, dark: o.darkMap)
                         snap = snapshots.latest()
                     }
                     if let jpg = renderer.render(frame: seq, nav: nav, p: p, snap: snap) {
-                        send(NL.image(seq: seq, jpeg: jpg, imageType: o.imageType))
+                        // Typ 0 = normální navigace: přístrojovka ukáže obraz bez levého sloupce
+                        send(NL.image(seq: seq, jpeg: jpg, imageType: 0))
                         if seq == 1 { log("➡️ První obrázek odeslán (\(jpg.count) B)") }
                         seq = seq >= 0xFFFF ? 1 : seq + 1
                         status.lastKB = jpg.count / 1024
@@ -298,8 +283,7 @@ final class DashSession {
                 status.fps = Double(acksInWindow) / now.timeIntervalSince(windowStart)
                 acksInWindow = 0
                 windowStart = now
-                status.effectiveWidth = effectiveWidth(o)
-                status.mapStats = snapshots.stats
+                status.mapStats = o.mapSource == .apple ? snapshots.stats : TileStore.shared.stats
                 publish()
             }
             if now.timeIntervalSince(lastSummary) >= 30 {
@@ -309,17 +293,6 @@ final class DashSession {
             }
         }
         if !link.isOpen { log("Spojení s motorkou zavřeno") }
-    }
-
-    private func effectiveWidth(_ o: TestOptions) -> Int { widthFallback ? 480 : o.imageWidth }
-
-    private func imageTypeName(_ t: UInt8) -> String {
-        switch t {
-        case 0: return "normální navigace"
-        case 1: return "křižovatka JCV"
-        case 3: return "rozšířená mapa"
-        default: return "?"
-        }
     }
 
     private func mpp() -> Double { mppTable[min(mppTable.count - 1, max(0, zoomLevel))] }
