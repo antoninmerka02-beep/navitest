@@ -110,19 +110,27 @@ struct VLabel {
     let priority: Int       // 0 město, 1 městečko, 2 vesnice, 3 čtvrť, 4 osada
 }
 
+/// Název silnice podél její čáry (souřadnice dlaždice).
+struct VRoadLabel {
+    let points: [CGPoint]
+    let name: String
+    let priority: Int       // 0 dálnice/rychlostní, 1 I. třída, 2 II., 3 III., 4 místní, 5 obslužná
+}
+
 final class VTile {
     let key: TileKey
     let extent: CGFloat
     let paths: [VBucket: CGPath]
     let labels: [VLabel]
-    init(key: TileKey, extent: CGFloat, paths: [VBucket: CGPath], labels: [VLabel]) {
-        self.key = key; self.extent = extent; self.paths = paths; self.labels = labels
+    let roads: [VRoadLabel]
+    init(key: TileKey, extent: CGFloat, paths: [VBucket: CGPath], labels: [VLabel], roads: [VRoadLabel]) {
+        self.key = key; self.extent = extent; self.paths = paths; self.labels = labels; self.roads = roads
     }
 }
 
 // MARK: - Dekodér Mapbox Vector Tile (schéma OpenMapTiles)
 enum MVTDecoder {
-    static let wantedLayers: Set<String> = ["water", "landcover", "landuse", "waterway", "transportation", "place"]
+    static let wantedLayers: Set<String> = ["water", "landcover", "landuse", "waterway", "transportation", "place", "transportation_name"]
 
     enum Value { case s(String), n(Double) }
 
@@ -130,23 +138,24 @@ enum MVTDecoder {
         var r = PBReader(bytes)
         var paths: [VBucket: CGMutablePath] = [:]
         var labels: [VLabel] = []
+        var roads: [VRoadLabel] = []
         var extent: CGFloat = 4096
         while !r.atEnd {
             let (f, w) = r.key()
             if f == 3 && w == 2 {
                 let rng = r.lengthDelimited()
-                decodeLayer(bytes, rng, &paths, &labels, &extent)
+                decodeLayer(bytes, rng, &paths, &labels, &roads, &extent)
             } else {
                 r.skip(w)
             }
         }
         var frozen: [VBucket: CGPath] = [:]
         for (b, p) in paths where !p.isEmpty { frozen[b] = p.copy() }
-        return VTile(key: key, extent: extent, paths: frozen, labels: labels)
+        return VTile(key: key, extent: extent, paths: frozen, labels: labels, roads: roads)
     }
 
     private static func decodeLayer(_ b: [UInt8], _ rng: Range<Int>, _ paths: inout [VBucket: CGMutablePath],
-                                    _ labels: inout [VLabel], _ extentOut: inout CGFloat) {
+                                    _ labels: inout [VLabel], _ roads: inout [VRoadLabel], _ extentOut: inout CGFloat) {
         var r = PBReader(b, rng.lowerBound, rng.upperBound)
         var name = ""
         var keys: [String] = []
@@ -200,6 +209,24 @@ enum MVTDecoder {
 
             let cls = str("class") ?? ""
             switch name {
+            case "transportation_name":
+                guard type == 2 else { continue }
+                let prio: Int
+                switch cls {
+                case "motorway", "trunk": prio = 0
+                case "primary": prio = 1
+                case "secondary": prio = 2
+                case "tertiary": prio = 3
+                case "minor": prio = 4
+                case "service": prio = 5
+                default: continue
+                }
+                var label = str("name:cs") ?? str("name:latin") ?? str("name") ?? ""
+                if label.isEmpty || prio == 0 { label = str("ref").map { $0.isEmpty ? label : $0 } ?? label }
+                if label.isEmpty { continue }
+                for line in collectLines(b, g) where line.count >= 2 {
+                    roads.append(VRoadLabel(points: line, name: label, priority: prio))
+                }
             case "place":
                 guard type == 1 else { continue }
                 let prio: Int
@@ -278,6 +305,28 @@ enum MVTDecoder {
             }
         }
         return v
+    }
+
+    /// Čáry jako pole bodů (pro popisky silnic).
+    static func collectLines(_ b: [UInt8], _ rng: Range<Int>) -> [[CGPoint]] {
+        var r = PBReader(b, rng.lowerBound, rng.upperBound)
+        var x: Int64 = 0, y: Int64 = 0
+        var lines: [[CGPoint]] = []
+        while !r.atEnd {
+            let cmd = r.varint()
+            let id = Int(cmd & 7)
+            let count = Int(clamping: cmd >> 3)
+            guard id == 1 || id == 2 else { if id == 7 { continue } else { break } }
+            var i = 0
+            while i < count && !r.atEnd {
+                x += zigzag(r.varint())
+                y += zigzag(r.varint())
+                let p = CGPoint(x: CGFloat(x), y: CGFloat(y))
+                if id == 1 || lines.isEmpty { lines.append([p]) } else { lines[lines.count - 1].append(p) }
+                i += 1
+            }
+        }
+        return lines
     }
 
     /// Příkazy geometrie MVT: 1 MoveTo, 2 LineTo, 7 ClosePath; parametry zigzag, relativně.

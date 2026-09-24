@@ -155,6 +155,17 @@ enum NL {
         return .init(svc: 6, pdt: pdtValue, payload: w.b)
     }
 
+    // MARK: Start trasy – bez toho přístrojovka „neví“ o trase (prázdný levý sloupec, „Route navigation unavailable“)
+    /// Průběh výpočtu trasy v %: 0 … 100, a -1 (0xFF) = výpočet dokončen.
+    static func routeCalcProgress(_ percent: Int) -> NLMessage {
+        .init(svc: 15, pdt: pdtValue, payload: [UInt8(truncatingIfNeeded: percent), 0])
+    }
+    /// Počet průjezdních bodů trasy.
+    static func viaCount(_ n: Int) -> NLMessage {
+        var w = ByteWriter(); w.u16(n)
+        return .init(svc: 18, pdt: pdtValue, payload: w.b)
+    }
+
     // MARK: Oblíbená místa (obsah typu 3) – seznam pro výběr cíle joystickem
     /// Hlavička seznamu: počet položek.
     static func favPoiUpdate(count: Int) -> NLMessage {
@@ -281,6 +292,10 @@ enum NL {
             ("ŠKOLA zrušit (9)", schoolZoneClear(), "047e0000"),
             ("RYCHLOST (9)", speedingEvent(), "017e0100"),
             ("OBLÍBENÉ počet (7)", favPoiUpdate(count: 3), "030000"),
+            ("VÝPOČET TRASY 0 % (15)", routeCalcProgress(0), "0000"),
+            ("VÝPOČET TRASY 100 % (15)", routeCalcProgress(100), "6400"),
+            ("VÝPOČET TRASY hotovo (15)", routeCalcProgress(-1), "ff00"),
+            ("PRŮJEZDNÍ BODY (18)", viaCount(300), "2c01"),
             ("OBLÍBENÉ položka (98)", favPoiData(list: 1, item: 2, direction: 3, dist: 2.5, unit: "km", name: "Domů"),
              "02000100030502000020406b6d446f6dc5af"),
         ]

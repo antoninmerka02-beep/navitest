@@ -25,6 +25,8 @@ struct RenderParams {
     var dark = true
     var mapSource: MapSource = .vector
     var turnBox = true
+    var threeD = false
+    var streetNames = true
     var note = ""
 }
 
@@ -84,7 +86,40 @@ final class FrameRenderer {
             }
         }
 
-        var labels: [PlacedLabel] = []
+        var result = VMapResult()
+        var toScreen: (CGPoint) -> CGPoint?
+        var arrowAt = anchor
+        let use3D = p.threeD && snap == nil
+
+        if use3D {
+            // ---- 3D: perspektiva, poloha dole uprostřed
+            let persp = Perspective(W: W, H: H, anchorY: 52, headingRad: p.northUp ? 0 : CGFloat(nav.heading * .pi / 180))
+            toScreen = { persp.project($0) }
+            arrowAt = CGPoint(x: W / 2, y: 52)
+            if p.mapSource == .vector {
+                result = vector.draw3D(ctx, pos: pos, mpp: p.mpp, persp: persp, dark: p.dark, streetNames: p.streetNames)
+            }
+            let behind = CGMutablePath()
+            persp.add(decimate(nav.routeBehind.map(local)), closed: false, to: behind)
+            strokePath(ctx, behind, color: CGColor(red: 0.5, green: 0.5, blue: 0.55, alpha: 0.9), width: 8)
+            let ahead = CGMutablePath()
+            persp.add(decimate(nav.routeAhead.map(local)), closed: false, to: ahead)
+            strokePath(ctx, ahead, color: CGColor(red: 0.0, green: 0.2, blue: 0.25, alpha: 1), width: 13)
+            strokePath(ctx, ahead, color: CGColor(red: 0.0, green: 0.85, blue: 0.95, alpha: 1), width: 8)
+            if let mp = nav.maneuverPoint, nav.guiding, let q = persp.project(local(mp)) {
+                ctx.setFillColor(CGColor(red: 0.85, green: 1.0, blue: 0.0, alpha: 1))
+                ctx.fillEllipse(in: CGRect(x: q.x - 7, y: q.y - 7, width: 14, height: 14))
+            }
+            // „mlha“ do dálky – vzdálené detaily splynou a obraz je klidnější
+            let bg = VStyle.background(dark: p.dark)
+            if let g = CGGradient(colorsSpace: cs, colors: [bg.copy(alpha: 0)!, bg.copy(alpha: 0.9)!] as CFArray, locations: [0, 1]) {
+                ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: H * 0.55), end: CGPoint(x: 0, y: H), options: [.drawsAfterEndLocation])
+            }
+        } else {
+        // ---- 2D
+        let c2 = cos(theta), s2 = sin(theta)
+        let zs = zoomScale
+        toScreen = { q in CGPoint(x: anchor.x + (q.x * c2 - q.y * s2) * zs, y: anchor.y + (q.x * s2 + q.y * c2) * zs) }
         ctx.saveGState()
         ctx.translateBy(x: anchor.x, y: anchor.y)
         ctx.rotate(by: theta)
@@ -96,7 +131,7 @@ final class FrameRenderer {
             ctx.draw(s.image, in: CGRect(x: -p0.x, y: p0.y - sz.height, width: sz.width, height: sz.height))
         } else if p.mapSource == .vector {
             let radius = hypot(W / 2, max(anchor.y, H - anchor.y)) + 24
-            labels = vector.draw(ctx, pos: pos, mpp: p.mpp, radiusPx: radius, dark: p.dark)
+            result = vector.draw(ctx, pos: pos, mpp: p.mpp, radiusPx: radius, dark: p.dark, streetNames: p.streetNames)
         }
         // ujetá část trasy
         stroke(ctx, nav.routeBehind.map(local), color: CGColor(red: 0.5, green: 0.5, blue: 0.55, alpha: 0.9), width: 8 / zoomScale)
@@ -111,13 +146,22 @@ final class FrameRenderer {
             ctx.fillEllipse(in: CGRect(x: q.x - r, y: q.y - r, width: 2 * r, height: 2 * r))
         }
         ctx.restoreGState()
+        }
 
-        // Popisky obcí – svisle, bez překryvů
-        drawLabels(ctx, labels, anchor: anchor, theta: theta, W: W, H: H, dark: p.dark)
+        // Popisky: nejdřív ulice podél silnic, pak obce (svisle); nepřekrývají se
+        var taken: [CGRect] = [
+            CGRect(x: 0, y: H - 72, width: 180, height: 72),                  // box se šipkou
+            CGRect(x: arrowAt.x - 30, y: arrowAt.y - 30, width: 60, height: 60), // naše poloha
+            CGRect(x: W - 70, y: 0, width: 70, height: 70),                   // limit přístrojovky
+            CGRect(x: 0, y: 40, width: 60, height: 120),                      // tlačítka +/− přístrojovky
+        ]
+        drawRoadLabels(ctx, result.roads, toScreen: toScreen, W: W, H: H, dark: p.dark, taken: &taken)
+        drawLabels(ctx, result.places, toScreen: toScreen, W: W, H: H, dark: p.dark, taken: &taken)
 
         // šipka polohy
         ctx.saveGState()
-        ctx.translateBy(x: anchor.x, y: anchor.y)
+        ctx.translateBy(x: arrowAt.x, y: arrowAt.y)
+        if use3D { ctx.scaleBy(x: 1, y: 0.8) }
         if p.northUp { ctx.rotate(by: -CGFloat(nav.heading * .pi / 180)) }
         ctx.setFillColor(CGColor(red: 0.85, green: 1.0, blue: 0.0, alpha: 1))
         ctx.setStrokeColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
@@ -136,23 +180,17 @@ final class FrameRenderer {
         if !nav.guiding { text(ctx, "Volná jízda", x: 8, y: H - 22, size: 14, color: fg) }
     }
 
-    private func drawLabels(_ ctx: CGContext, _ labels: [PlacedLabel], anchor: CGPoint, theta: CGFloat, W: CGFloat, H: CGFloat, dark: Bool) {
+    private func drawLabels(_ ctx: CGContext, _ labels: [PlacedLabel], toScreen: (CGPoint) -> CGPoint?,
+                            W: CGFloat, H: CGFloat, dark: Bool, taken: inout [CGRect]) {
         guard !labels.isEmpty else { return }
-        let c = cos(theta), s = sin(theta)
-        var taken: [CGRect] = [
-            CGRect(x: 0, y: H - 72, width: 180, height: 72),        // box se šipkou
-            CGRect(x: anchor.x - 30, y: anchor.y - 30, width: 60, height: 60),   // naše poloha
-            CGRect(x: W - 70, y: 0, width: 70, height: 70),         // limit přístrojovky
-            CGRect(x: 0, y: 40, width: 60, height: 120),            // tlačítka +/− přístrojovky
-        ]
         let sorted = labels.sorted { $0.priority < $1.priority }
         var drawn = 0
         let fill = dark ? CGColor(red: 0.92, green: 0.93, blue: 0.95, alpha: 1) : CGColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1)
         let halo = dark ? CGColor(red: 0.07, green: 0.08, blue: 0.09, alpha: 1) : CGColor(red: 1, green: 1, blue: 1, alpha: 1)
         for l in sorted {
             if drawn >= 6 { break }
-            let sx = anchor.x + l.local.x * c - l.local.y * s
-            let sy = anchor.y + l.local.x * s + l.local.y * c
+            guard let sp = toScreen(l.local) else { continue }
+            let sx = sp.x, sy = sp.y
             let size: CGFloat = l.priority <= 1 ? 15 : (l.priority == 2 ? 13 : 11)
             let w = CGFloat(l.name.count) * size * 0.58 + 6
             let rect = CGRect(x: sx - w / 2, y: sy - size / 2, width: w, height: size + 4)
@@ -162,6 +200,81 @@ final class FrameRenderer {
             text(ctx, l.name, x: rect.minX + 3, y: rect.minY + 2, size: size, color: fill, bold: l.priority <= 2, halo: halo)
             drawn += 1
         }
+    }
+
+    /// Název ulice podél silnice: najde nejdelší téměř rovný úsek na obrazovce a text otočí podél něj.
+    private func drawRoadLabels(_ ctx: CGContext, _ roads: [PlacedRoad], toScreen: (CGPoint) -> CGPoint?,
+                                W: CGFloat, H: CGFloat, dark: Bool, taken: inout [CGRect]) {
+        guard !roads.isEmpty else { return }
+        let fill = dark ? CGColor(red: 0.86, green: 0.88, blue: 0.91, alpha: 1) : CGColor(red: 0.15, green: 0.15, blue: 0.18, alpha: 1)
+        let halo = dark ? CGColor(red: 0.07, green: 0.08, blue: 0.09, alpha: 1) : CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+        var usedNames = Set<String>()
+        var drawn = 0
+        for r in roads.sorted(by: { $0.priority < $1.priority }) {
+            if drawn >= 5 { break }
+            if usedNames.contains(r.name) { continue }
+            let size: CGFloat = r.priority <= 1 ? 12 : 11
+            let font = CTFontCreateWithName("Helvetica-Bold" as CFString, size, nil)
+            let attrs: [NSAttributedString.Key: Any] = [NSAttributedString.Key(kCTFontAttributeName as String): font]
+            let tw = CGFloat(CTLineGetTypographicBounds(CTLineCreateWithAttributedString(NSAttributedString(string: r.name, attributes: attrs)), nil, nil, nil))
+            let pts = r.local.compactMap { toScreen($0) }
+            guard pts.count >= 2 else { continue }
+            // nejdelší téměř rovný úsek (tětiva přes body s odchylkou < 20°)
+            var best: (CGPoint, CGPoint, CGFloat)? = nil
+            for i in 0..<(pts.count - 1) {
+                var j = i + 1
+                let base = atan2(pts[j].y - pts[i].y, pts[j].x - pts[i].x)
+                while j + 1 < pts.count {
+                    let a2 = atan2(pts[j + 1].y - pts[j].y, pts[j + 1].x - pts[j].x)
+                    var d = abs(a2 - base)
+                    if d > .pi { d = 2 * .pi - d }
+                    if d > 0.35 { break }
+                    j += 1
+                }
+                let len = hypot(pts[j].x - pts[i].x, pts[j].y - pts[i].y)
+                if len > tw + 14 && len > (best?.2 ?? 0) { best = (pts[i], pts[j], len) }
+            }
+            guard let bst = best else { continue }
+            let a = bst.0, b = bst.1
+            let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+            guard mid.x > 25, mid.x < W - 25, mid.y > 14, mid.y < H - 14 else { continue }
+            var ang = atan2(b.y - a.y, b.x - a.x)
+            if ang > .pi / 2 { ang -= .pi } else if ang < -.pi / 2 { ang += .pi }
+            let bw = abs(tw * cos(ang)) + abs(size * sin(ang)) + 6
+            let bh = abs(tw * sin(ang)) + abs(size * cos(ang)) + 4
+            let rect = CGRect(x: mid.x - bw / 2, y: mid.y - bh / 2, width: bw, height: bh)
+            if taken.contains(where: { $0.intersects(rect) }) { continue }
+            taken.append(rect)
+            usedNames.insert(r.name)
+            ctx.saveGState()
+            ctx.translateBy(x: mid.x, y: mid.y)
+            ctx.rotate(by: ang)
+            text(ctx, r.name, x: -tw / 2, y: -size * 0.35, size: size, color: fill, bold: true, halo: halo)
+            ctx.restoreGState()
+            drawn += 1
+        }
+    }
+
+    /// Vynechá body blíž než ~2 px (celá trasa může mít tisíce bodů).
+    private func decimate(_ pts: [CGPoint]) -> [CGPoint] {
+        guard pts.count > 2 else { return pts }
+        var out = [pts[0]]
+        for q in pts.dropFirst() {
+            if let l = out.last, abs(q.x - l.x) + abs(q.y - l.y) < 2 { continue }
+            out.append(q)
+        }
+        if let e = pts.last, out.last != e { out.append(e) }
+        return out
+    }
+
+    private func strokePath(_ ctx: CGContext, _ path: CGPath, color: CGColor, width: CGFloat) {
+        guard !path.isEmpty else { return }
+        ctx.addPath(path)
+        ctx.setStrokeColor(color)
+        ctx.setLineWidth(width)
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        ctx.strokePath()
     }
 
     private func stroke(_ ctx: CGContext, _ pts: [CGPoint], color: CGColor, width: CGFloat) {

@@ -1,17 +1,10 @@
-# NaviTest R9 – verze 0.5
+# NaviTest R9 – verze 0.6
 
-Nové rozhraní:
-- Hlavní obrazovka = mapa s polohou, vyhledávání s našeptávačem (prázdné pole = poslední hledání,
-  při psaní nejdřív shody z historie a oblíbených, pak Apple Mapy od nejpodobnějších).
-- Karta místa: Navigovat / Uložit jako Domů, Práce, Oblíbené.
-- Panel navigace se šipkou, vzdáleností, zbývajícími km, časem a příjezdem.
-- Ozubené kolo: Mapa v motorce, Navigace, Asistence jezdce, Oblíbená místa, Motorka, Diagnostika,
-  tovární reset (včetně oblíbených a historie) s potvrzením.
+- Start trasy jako Garmin: při spuštění, přepočtu i novém připojení dostane přístrojovka
+  průběh výpočtu trasy (0 → 100 % → hotovo), „naviguji“ a počet průjezdních bodů.
+  Cíl: šipka v levém sloupci přístrojovky a funkční Change View → Turn-by-Turn / Turn List.
+  (Posílá se i v simulaci, takže se dá zkoušet doma.)
+- 3D pohled (Nastavení → Mapa v motorce → Pohled 2D/3D): nakloněná mapa, vidíš ~5× dál dopředu.
+- Názvy ulic podél silnic při přiblížení (lze vypnout).
 
-Propojení s motorkou:
-- Domů a Práce se hlásí přístrojovce; povel „domů“ / „do práce“ z menu motorky spustí navigaci.
-- Seznam oblíbených na přístrojovce (Domů, Práce, oblíbené, 5 posledních cílů) se vzdáleností a směrem;
-  výběr joystickem spustí navigaci.
-
-Obsahuje i všechny opravy z 0.4.
 Mapová data © přispěvatelé OpenStreetMap, dlaždice OpenFreeMap, © OpenMapTiles.

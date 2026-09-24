@@ -40,6 +40,8 @@ struct TestOptions: Codable {
     var turnBox = true                // vlastní šipka + vzdálenost v obrázku
     var northUp = false
     var darkMap = true
+    var threeD = false                // 3D (nakloněný) pohled
+    var streetNames = true            // názvy ulic podél silnic
 
     init() {}
 
@@ -57,6 +59,8 @@ struct TestOptions: Codable {
         turnBox = (try? c.decodeIfPresent(Bool.self, forKey: .turnBox)) ?? d.turnBox
         northUp = (try? c.decodeIfPresent(Bool.self, forKey: .northUp)) ?? d.northUp
         darkMap = (try? c.decodeIfPresent(Bool.self, forKey: .darkMap)) ?? d.darkMap
+        threeD = (try? c.decodeIfPresent(Bool.self, forKey: .threeD)) ?? d.threeD
+        streetNames = (try? c.decodeIfPresent(Bool.self, forKey: .streetNames)) ?? d.streetNames
     }
 }
 
@@ -134,6 +138,7 @@ final class DashSession {
     private var lastSpeedLog = Date.distantPast
     private var lastGuiding: Bool? = nil
     private var lastLoggedSource: MapSource? = nil
+    private var lastRouteGen = -1
 
     /// metrů na pixel pro jednotlivé úrovně zoomu (0,25 = nejblíž, 160 = nejdál)
     private let mppTable: [Double] = [0.25, 0.4, 0.6, 0.9, 1.3, 2, 3, 4.5, 6.5, 10, 15, 22, 33, 50, 75, 110, 160]
@@ -198,6 +203,7 @@ final class DashSession {
         lastTbtIndex = -1
         lastGuiding = nil
         lastLoggedSource = nil
+        lastRouteGen = -1
         defer {
             link.close()
             setRunning(false)
@@ -304,6 +310,14 @@ final class DashSession {
                     nav = navigator.snapshot()
                 }
                 updateGuidingState(nav)
+                // Nová trasa (nebo přepočet, nebo nové připojení během navigace) → start trasy jako Garmin
+                if let n = nav, n.guiding {
+                    let gen = o.navSource == .real ? navigator.routeGeneration : -2   // simulace = jedna „trasa“
+                    if gen != lastRouteGen {
+                        lastRouteGen = gen
+                        sendRouteStart()
+                    }
+                }
                 if o.sendNavData, let n = nav, n.guiding { sendNav(n, o) }
             }
 
@@ -326,6 +340,8 @@ final class DashSession {
                     p.dark = o.darkMap
                     p.mapSource = o.mapSource
                     p.turnBox = o.turnBox
+                    p.threeD = o.threeD
+                    p.streetNames = o.streetNames
                     var snap: MapSnapshotProvider.Snap? = nil
                     if o.mapSource == .apple, let pos = nav?.position {
                         snapshots.ensure(center: pos, mpp: p.mpp, dark: o.darkMap)
@@ -373,6 +389,16 @@ final class DashSession {
 
     private func zoomMessage(show: Bool) -> NLMessage {
         NL.zoom(current: zoomLevel, lo: 0, hi: mppTable.count - 1, label: zoomLabel(), show: show)
+    }
+
+    /// Sekvence jako StreetCross po výpočtu trasy: průběh 0 → 100 % → hotovo, „naviguji“, průjezdní body.
+    private func sendRouteStart() {
+        send(NL.routeCalcProgress(0))
+        send(NL.routeCalcProgress(100))
+        send(NL.routeCalcProgress(-1))
+        send(NL.flag(2, true))
+        send(NL.viaCount(0))
+        log("➡️ Start trasy pro přístrojovku (výpočet 0→100 %, hotovo, naviguji, průjezdní body 0)")
     }
 
     private func updateGuidingState(_ nav: NavSnapshot?) {

@@ -378,11 +378,16 @@ struct MapSettingsView: View {
                 Picker("Podklad", selection: $m.opts.mapSource) {
                     ForEach(MapSource.allCases) { Text($0.label).tag($0) }
                 }
+                Picker("Pohled", selection: $m.opts.threeD) {
+                    Text("2D").tag(false)
+                    Text("3D").tag(true)
+                }.pickerStyle(.segmented)
+                Toggle("Názvy ulic", isOn: $m.opts.streetNames)
                 Toggle("Šipka a vzdálenost v obrázku", isOn: $m.opts.turnBox)
                 Toggle("Sever nahoře (jinak po směru jízdy)", isOn: $m.opts.northUp)
                 Toggle("Tmavá mapa", isOn: $m.opts.darkMap)
             } footer: {
-                Text("Apple mapa funguje jen s odemčeným telefonem. Mapa OSM funguje i v kapse.")
+                Text("3D: mapa je nakloněná, vidíš dál dopředu. Apple mapa funguje jen s odemčeným telefonem a jen ve 2D; mapa OSM funguje i v kapse. Pokud přístrojovka ukazuje šipku v levém sloupci, šipku v obrázku můžeš vypnout.")
             }
             Section("Obraz") {
                 Stepper("Snímků za sekundu: \(Int(m.opts.imageFps))", value: $m.opts.imageFps, in: 1...6, step: 1)

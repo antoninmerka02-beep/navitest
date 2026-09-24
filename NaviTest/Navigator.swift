@@ -219,6 +219,10 @@ final class Navigator {
     private var heading: Double = 0
     private var arrivedAt: Date?
     private var lastReroute = Date.distantPast
+    private var _generation = 0
+
+    /// Zvyšuje se s každou novou trasou (i přepočtem) – podle toho se přístrojovce posílá start trasy.
+    var routeGeneration: Int { lock.lock(); defer { lock.unlock() }; return _generation }
 
     /// Volá se na hlavním vlákně, když je potřeba přepočítat trasu (sjetí z trasy).
     var onReroute: ((CLLocation) -> Void)?
@@ -229,6 +233,7 @@ final class Navigator {
     func setRoute(_ r: NavRoute?) {
         lock.lock(); defer { lock.unlock() }
         route = r
+        if r != nil { _generation += 1 }
         matchedSeg = 0; along = 0; offCount = 0; arrivedAt = nil; matchDist = .infinity
         if let loc = lastLocation, r != nil {
             let m = match(loc, full: true)
