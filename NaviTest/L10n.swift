@@ -1,0 +1,185 @@
+import Foundation
+
+/// Jazyk rozhraní appky. Výchozí je angličtina (po instalaci i po továrním resetu).
+enum AppLanguage: String, Codable, CaseIterable, Identifiable {
+    case en, cs
+    var id: String { rawValue }
+    var label: String { self == .en ? "English" : "Čeština" }
+    /// Kód hlasu pro převod textu na řeč.
+    var speechCode: String { self == .en ? "en-GB" : "cs-CZ" }
+}
+
+enum L10n {
+    /// Aktuální jazyk – nastavuje AppModel při startu a při změně v nastavení.
+    static var lang: AppLanguage = .en
+
+    /// Klíčem je anglický text, hodnotou český překlad. Chybějící překlad = anglický text.
+    static let cs: [String: String] = [
+        // Hlavní obrazovka
+        "Where to?": "Kam jedeme?",
+        "No search history yet": "Zatím žádná historie hledání",
+        "Searching…": "Hledám…",
+        "Home": "Domů",
+        "Work": "Práce",
+        "%@: search for a place and tap Save → %@": "%@: vyhledej místo a dej Uložit → %@",
+        "Remove": "Odstranit",
+        "Bike connected": "Motorka připojena",
+        "Bike not connected": "Motorka nepřipojena",
+        // Karta místa
+        "Calculating…": "Počítám…",
+        "Navigate": "Navigovat",
+        "Set as Home": "Nastavit jako Domů",
+        "Set as Work": "Nastavit jako Práce",
+        "Add to favorites": "Přidat do oblíbených",
+        "Save": "Uložit",
+        "%ld m as the crow flies": "%ld m vzdušnou čarou",
+        "%.1f km as the crow flies": "%.1f km vzdušnou čarou",
+        // Panel navigace
+        "You have arrived": "Jste v cíli",
+        "%.1f km · %ld min · arrival %02ld:%02ld": "%.1f km · %ld min · příjezd %02ld:%02ld",
+        "End": "Ukončit",
+        "Calculating route…": "Počítám trasu…",
+        "Waiting for location…": "Čekám na polohu…",
+        // Nastavení
+        "Settings": "Nastavení",
+        "Map on the bike": "Mapa v motorce",
+        "Navigation": "Navigace",
+        "Voice guidance": "Hlasové navádění",
+        "Rider assistance": "Asistence jezdce",
+        "Favorite places": "Oblíbená místa",
+        "Language": "Jazyk",
+        "Bike": "Motorka",
+        "connected": "připojena",
+        "not connected": "nepřipojena",
+        "Diagnostics": "Diagnostika",
+        "Restore factory settings": "Obnovit tovární nastavení",
+        "Restore factory settings?": "Obnovit tovární nastavení?",
+        "Restore": "Obnovit",
+        "Cancel": "Zrušit",
+        "All settings will be reset and favorite places and search history will be deleted. Downloaded maps stay on the phone.":
+            "Vrátí se všechna nastavení a smažou se oblíbená místa i historie hledání. Stažené mapy v telefonu zůstanou.",
+        "Map data © OpenStreetMap contributors, OpenFreeMap, © OpenMapTiles":
+            "Mapová data © přispěvatelé OpenStreetMap, OpenFreeMap, © OpenMapTiles",
+        // Mapa v motorce
+        "Base map": "Podklad",
+        "OSM map": "Mapa OSM",
+        "Route only": "Jen trasa",
+        "View": "Pohled",
+        "Street names": "Názvy ulic",
+        "Turn arrow and distance in the image": "Šipka a vzdálenost v obrázku",
+        "North up (otherwise direction of travel)": "Sever nahoře (jinak po směru jízdy)",
+        "Dark map": "Tmavá mapa",
+        "3D: the map is tilted so you see further ahead. Apple map works only with the phone unlocked and only in 2D; the OSM map works in your pocket too. If the dashboard shows the turn arrow in its left column, you can turn off the arrow in the image.":
+            "3D: mapa je nakloněná, vidíš dál dopředu. Apple mapa funguje jen s odemčeným telefonem a jen ve 2D; mapa OSM funguje i v kapse. Pokud přístrojovka ukazuje šipku v levém sloupci, šipku v obrázku můžeš vypnout.",
+        "Image": "Obraz",
+        "Frames per second: %ld": "Snímků za sekundu: %ld",
+        "Image quality: %ld %%": "Kvalita obrazu: %ld %%",
+        // Navigace
+        "Avoid motorways": "Vyhnout se dálnicím",
+        "Avoid tolls": "Vyhnout se placeným úsekům",
+        "Motorcycle-friendly routes are planned for a later version.": "Motorkářské trasy připravujeme.",
+        // Hlas
+        "Spoken instructions": "Hlasové pokyny",
+        "Street names in instructions": "Názvy ulic v pokynech",
+        "Volume": "Hlasitost",
+        "Play sample": "Přehrát ukázku",
+        "Instructions are spoken in the app language and play through your helmet intercom; music is lowered while speaking. Better voices can be downloaded in iPhone Settings → Accessibility → Spoken Content → Voices.":
+            "Pokyny zazní v jazyce appky a jdou do helmy přes intercom, hudba se při nich ztiší. Kvalitnější hlasy stáhneš v Nastavení iPhonu → Zpřístupnění → Mluvený obsah → Hlasy.",
+        // Asistence
+        "Speed cameras and section control": "Radary a úsekové měření",
+        "School zones": "Školní zóny",
+        "Country borders": "Hranice států",
+        "Speeding": "Překročení rychlosti",
+        "Speed camera and speed limit data will be added in a later version. You can try the warnings below.":
+            "Data o radarech a rychlostních limitech doplníme v další verzi. Zatím si můžeš varování vyzkoušet níže.",
+        "Try on the dashboard": "Vyzkoušet na přístrojovce",
+        "Camera 50": "Radar 50",
+        "Section 90": "Úsekové 90",
+        "Red light": "Červená",
+        "Mobile": "Mobilní",
+        "School": "Škola",
+        "Border": "Hranice",
+        "Speed": "Rychlost",
+        "Clear all": "Zrušit vše",
+        // Oblíbená místa
+        "Home and Work can also be chosen from the bike's menu. Set them by searching for a place → Save.":
+            "Domů a Práce se dají vybrat i v menu motorky. Nastavíš je přes vyhledání místa → Uložit.",
+        "not set": "nenastaveno",
+        "None yet": "Zatím žádná",
+        "Clear search history (%ld)": "Smazat historii hledání (%ld)",
+        "Clear search history?": "Smazat historii hledání?",
+        "Clear": "Smazat",
+        // Motorka
+        "Status": "Stav",
+        "Connection": "Spojení",
+        "Dashboard": "Přístrojovka",
+        "Mode": "Režim",
+        "Connect": "Připojit",
+        "Disconnect": "Odpojit",
+        "Connect to the bike automatically": "Automaticky připojit k motorce",
+        "Accessories (MFi)": "Příslušenství (MFi)",
+        "none": "žádné",
+        "Refresh": "Obnovit",
+        "Not connected": "Nepřipojeno",
+        "Handshake…": "Navazuji spojení…",
+        "Connected": "Spojeno",
+        "Disconnected": "Odpojeno",
+        "Bike not found": "Motorka nenalezena",
+        // Diagnostika
+        "Navigation source": "Zdroj navigace",
+        "Source": "Zdroj",
+        "Simulation": "Simulace",
+        "Real": "Skutečná",
+        "Send images": "Posílat obrázky",
+        "Send navigation data": "Posílat navigační data",
+        "Turn message": "Zpráva se šipkami",
+        "Map": "Mapa",
+        "Last received": "Poslední příchozí",
+        "Log": "Log",
+        "Save log": "Ukládat log",
+        "Turn on before a test ride, then export the log and send it.": "Zapni před testovací jízdou, pak log exportuj a pošli.",
+        "Open log": "Otevřít log",
+        "Show navigation steps": "Zobrazit navigační kroky",
+        "Navigation steps": "Navigační kroky",
+        "No route": "Žádná trasa",
+        "Export": "Exportovat",
+        // Hlášky
+        "Factory settings restored": "Obnoveno tovární nastavení",
+        "Place could not be found": "Místo se nepodařilo najít",
+        "Saved as Home": "Uloženo jako Domů",
+        "Saved as Work": "Uloženo jako Práce",
+        "Added to favorites": "Přidáno do oblíbených",
+        "Route could not be calculated": "Trasu se nepodařilo spočítat",
+        "Place": "Místo",
+        "Destination": "Cíl",
+        "Free drive": "Volná jízda",
+        // Názvy manévrů
+        "destination": "cíl",
+        "destination on the left": "cíl vlevo",
+        "destination on the right": "cíl vpravo",
+        "keep left": "držet vlevo",
+        "keep right": "držet vpravo",
+        "straight": "rovně",
+        "exit left": "sjezd vlevo",
+        "exit right": "sjezd vpravo",
+        "roundabout": "kruháč",
+        "roundabout %ld°": "kruháč %ld°",
+        "sharp left": "ostře vlevo",
+        "sharp right": "ostře vpravo",
+        "left": "vlevo",
+        "right": "vpravo",
+        "U-turn": "otočka",
+        "U-turn right": "otočka vpravo",
+        "icon %ld": "ikona %ld",
+    ]
+}
+
+/// Přeloží text (klíč = anglický text) do aktuálního jazyka appky.
+func T(_ key: String) -> String {
+    L10n.lang == .cs ? (L10n.cs[key] ?? key) : key
+}
+
+/// Přeloží formátovací řetězec a dosadí hodnoty.
+func TF(_ key: String, _ args: CVarArg...) -> String {
+    String(format: T(key), arguments: args)
+}

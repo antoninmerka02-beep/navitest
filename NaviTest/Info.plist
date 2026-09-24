@@ -3,20 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>cs</string>
-	<key>CFBundleLocalizations</key>
-	<array>
-		<string>cs</string>
-	</array>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>NaviTest</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>cs</string>
+	</array>
 	<key>CFBundleName</key>
-	<string>NaviTest</string>
-	<key>CFBundleDisplayName</key>
 	<string>NaviTest</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
@@ -26,35 +27,36 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>UILaunchScreen</key>
-	<dict/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Spojení s přístrojovkou motorky.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Poloha drží aplikaci běžící na pozadí, aby mohla posílat navigaci do motorky.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Poloha drží aplikaci běžící na pozadí, aby mohla posílat navigaci do motorky.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
-	<key>UISupportedInterfaceOrientations</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>external-accessory</string>
 		<string>location</string>
+		<string>audio</string>
 	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict/>
 	<key>UISupportedExternalAccessoryProtocols</key>
 	<array>
 		<string>com.garmin.navilite.data</string>
 	</array>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Poloha drží aplikaci běžící na pozadí, aby mohla posílat navigaci do motorky.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Poloha drží aplikaci běžící na pozadí, aby mohla posílat navigaci do motorky.</string>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Spojení s přístrojovkou motorky.</string>
-	<key>UIFileSharingEnabled</key>
-	<true/>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
 </dict>
 </plist>

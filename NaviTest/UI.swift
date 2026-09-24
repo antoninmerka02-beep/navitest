@@ -122,7 +122,7 @@ struct MainView: View {
         HStack(spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Kam jedeme?", text: $query)
+                TextField(T("Where to?"), text: $query)
                     .focused($focused)
                     .submitLabel(.search)
                     .autocorrectionDisabled()
@@ -149,7 +149,7 @@ struct MainView: View {
         let items = m.completer.suggestions(query: query, store: m.places)
         return VStack(alignment: .leading, spacing: 0) {
             if items.isEmpty {
-                Text(query.isEmpty ? "Zatím žádná historie hledání" : "Hledám…")
+                Text(query.isEmpty ? T("No search history yet") : T("Searching…"))
                     .foregroundStyle(.secondary).padding(12)
             }
             ScrollView {
@@ -197,8 +197,8 @@ struct MainView: View {
     private var favoritesRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                favChip("Domů", "house.fill", m.places.home)
-                favChip("Práce", "briefcase.fill", m.places.work)
+                favChip(T("Home"), "house.fill", m.places.home)
+                favChip(T("Work"), "briefcase.fill", m.places.work)
                 ForEach(m.places.others) { p in favChip(p.name, "star.fill", p) }
             }
         }
@@ -207,7 +207,7 @@ struct MainView: View {
     private func favChip(_ title: String, _ icon: String, _ p: Place?) -> some View {
         Button {
             if let p = p { m.navigate(to: p) }
-            else { m.flash("\(title): vyhledej místo a dej Uložit → \(title)") }
+            else { m.flash(TF("%@: search for a place and tap Save → %@", title, title)) }
         } label: {
             Label(title, systemImage: icon)
                 .font(.subheadline.weight(.semibold))
@@ -218,7 +218,7 @@ struct MainView: View {
         .foregroundStyle(.primary)
         .contextMenu {
             if let p = p {
-                Button(role: .destructive) { m.removePlace(p) } label: { Label("Odstranit", systemImage: "trash") }
+                Button(role: .destructive) { m.removePlace(p) } label: { Label(T("Remove"), systemImage: "trash") }
             }
         }
     }
@@ -231,7 +231,7 @@ struct MainView: View {
                 GuidancePanel()
             }
             HStack {
-                Label(m.bikeConnected ? "Motorka připojena" : "Motorka nepřipojena",
+                Label(m.bikeConnected ? T("Bike connected") : T("Bike not connected"),
                       systemImage: m.bikeConnected ? "checkmark.circle.fill" : "antenna.radiowaves.left.and.right.slash")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(m.bikeConnected ? Color.green : Color.secondary)
@@ -266,17 +266,17 @@ struct PlaceCard: View {
             }
             HStack(spacing: 10) {
                 Button { m.navigate(to: place) } label: {
-                    Label(m.calculating ? "Počítám…" : "Navigovat", systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                    Label(m.calculating ? T("Calculating…") : T("Navigate"), systemImage: "arrow.triangle.turn.up.right.diamond.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(m.calculating)
                 Menu {
-                    Button { m.setHome(place) } label: { Label("Nastavit jako Domů", systemImage: "house") }
-                    Button { m.setWork(place) } label: { Label("Nastavit jako Práce", systemImage: "briefcase") }
-                    Button { m.addFavorite(place) } label: { Label("Přidat do oblíbených", systemImage: "star") }
+                    Button { m.setHome(place) } label: { Label(T("Set as Home"), systemImage: "house") }
+                    Button { m.setWork(place) } label: { Label(T("Set as Work"), systemImage: "briefcase") }
+                    Button { m.addFavorite(place) } label: { Label(T("Add to favorites"), systemImage: "star") }
                 } label: {
-                    Label("Uložit", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
+                    Label(T("Save"), systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
                 }
                 .menuStyle(.button)
                 .buttonStyle(.bordered)
@@ -299,25 +299,25 @@ struct GuidancePanel: View {
                         .font(.system(size: 34, weight: .bold))
                         .frame(width: 50)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(g.arrived ? "Jste v cíli" : distText(g.toNext)).font(.title2.bold())
+                        Text(g.arrived ? T("You have arrived") : distText(g.toNext)).font(.title2.bold())
                         Text(g.road).font(.subheadline).lineLimit(1)
                     }
                     Spacer()
                 }
                 HStack {
-                    Text(String(format: "%.1f km · %ld min · příjezd %02ld:%02ld",
-                                g.remaining / 1000, g.minutesLeft, g.etaHour, g.etaMinute))
+                    Text(TF("%.1f km · %ld min · arrival %02ld:%02ld",
+                            g.remaining / 1000, g.minutesLeft, g.etaHour, g.etaMinute))
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button(role: .destructive) { m.endNavigation() } label: { Label("Ukončit", systemImage: "xmark") }
+                    Button(role: .destructive) { m.endNavigation() } label: { Label(T("End"), systemImage: "xmark") }
                         .buttonStyle(.bordered)
                 }
             } else {
                 HStack {
                     ProgressView()
-                    Text(m.calculating ? "Počítám trasu…" : "Čekám na polohu…")
+                    Text(m.calculating ? T("Calculating route…") : T("Waiting for location…"))
                     Spacer()
-                    Button("Ukončit") { m.endNavigation() }
+                    Button(T("End")) { m.endNavigation() }
                 }
             }
         }
@@ -339,33 +339,41 @@ struct SettingsView: View {
     var body: some View {
         List {
             Section {
-                NavigationLink { MapSettingsView() } label: { Label("Mapa v motorce", systemImage: "map") }
-                NavigationLink { NavSettingsView() } label: { Label("Navigace", systemImage: "arrow.triangle.turn.up.right.diamond") }
-                NavigationLink { AssistSettingsView() } label: { Label("Asistence jezdce", systemImage: "exclamationmark.triangle") }
-                NavigationLink { FavoritesSettingsView() } label: { Label("Oblíbená místa", systemImage: "star") }
+                Picker(selection: $m.language) {
+                    ForEach(AppLanguage.allCases) { Text($0.label).tag($0) }
+                } label: {
+                    Label(T("Language"), systemImage: "globe")
+                }
+            }
+            Section {
+                NavigationLink { MapSettingsView() } label: { Label(T("Map on the bike"), systemImage: "map") }
+                NavigationLink { NavSettingsView() } label: { Label(T("Navigation"), systemImage: "arrow.triangle.turn.up.right.diamond") }
+                NavigationLink { VoiceSettingsView() } label: { Label(T("Voice guidance"), systemImage: "speaker.wave.2") }
+                NavigationLink { AssistSettingsView() } label: { Label(T("Rider assistance"), systemImage: "exclamationmark.triangle") }
+                NavigationLink { FavoritesSettingsView() } label: { Label(T("Favorite places"), systemImage: "star") }
             }
             Section {
                 NavigationLink { BikeView() } label: {
                     HStack {
-                        Label("Motorka", systemImage: "antenna.radiowaves.left.and.right")
+                        Label(T("Bike"), systemImage: "antenna.radiowaves.left.and.right")
                         Spacer()
-                        Text(m.bikeConnected ? "připojena" : "nepřipojena").foregroundStyle(.secondary)
+                        Text(m.bikeConnected ? T("connected") : T("not connected")).foregroundStyle(.secondary)
                     }
                 }
-                NavigationLink { DiagnosticsView() } label: { Label("Diagnostika", systemImage: "wrench.and.screwdriver") }
+                NavigationLink { DiagnosticsView() } label: { Label(T("Diagnostics"), systemImage: "wrench.and.screwdriver") }
             }
             Section {
-                Button("Obnovit tovární nastavení", role: .destructive) { confirmReset = true }
+                Button(T("Restore factory settings"), role: .destructive) { confirmReset = true }
             } footer: {
-                Text("NaviTest \(m.version) · Mapová data © přispěvatelé OpenStreetMap, OpenFreeMap, © OpenMapTiles")
+                Text("NaviTest \(m.version) · " + T("Map data © OpenStreetMap contributors, OpenFreeMap, © OpenMapTiles"))
             }
         }
-        .navigationTitle("Nastavení")
-        .alert("Obnovit tovární nastavení?", isPresented: $confirmReset) {
-            Button("Obnovit", role: .destructive) { m.factoryReset() }
-            Button("Zrušit", role: .cancel) {}
+        .navigationTitle(T("Settings"))
+        .alert(T("Restore factory settings?"), isPresented: $confirmReset) {
+            Button(T("Restore"), role: .destructive) { m.factoryReset() }
+            Button(T("Cancel"), role: .cancel) {}
         } message: {
-            Text("Vrátí se všechna nastavení a smažou se oblíbená místa i historie hledání. Stažené mapy v telefonu zůstanou.")
+            Text(T("All settings will be reset and favorite places and search history will be deleted. Downloaded maps stay on the phone."))
         }
     }
 }
@@ -375,29 +383,29 @@ struct MapSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Podklad", selection: $m.opts.mapSource) {
+                Picker(T("Base map"), selection: $m.opts.mapSource) {
                     ForEach(MapSource.allCases) { Text($0.label).tag($0) }
                 }
-                Picker("Pohled", selection: $m.opts.threeD) {
+                Picker(T("View"), selection: $m.opts.threeD) {
                     Text("2D").tag(false)
                     Text("3D").tag(true)
                 }.pickerStyle(.segmented)
-                Toggle("Názvy ulic", isOn: $m.opts.streetNames)
-                Toggle("Šipka a vzdálenost v obrázku", isOn: $m.opts.turnBox)
-                Toggle("Sever nahoře (jinak po směru jízdy)", isOn: $m.opts.northUp)
-                Toggle("Tmavá mapa", isOn: $m.opts.darkMap)
+                Toggle(T("Street names"), isOn: $m.opts.streetNames)
+                Toggle(T("Turn arrow and distance in the image"), isOn: $m.opts.turnBox)
+                Toggle(T("North up (otherwise direction of travel)"), isOn: $m.opts.northUp)
+                Toggle(T("Dark map"), isOn: $m.opts.darkMap)
             } footer: {
-                Text("3D: mapa je nakloněná, vidíš dál dopředu. Apple mapa funguje jen s odemčeným telefonem a jen ve 2D; mapa OSM funguje i v kapse. Pokud přístrojovka ukazuje šipku v levém sloupci, šipku v obrázku můžeš vypnout.")
+                Text(T("3D: the map is tilted so you see further ahead. Apple map works only with the phone unlocked and only in 2D; the OSM map works in your pocket too. If the dashboard shows the turn arrow in its left column, you can turn off the arrow in the image."))
             }
-            Section("Obraz") {
-                Stepper("Snímků za sekundu: \(Int(m.opts.imageFps))", value: $m.opts.imageFps, in: 1...6, step: 1)
+            Section(T("Image")) {
+                Stepper(TF("Frames per second: %ld", Int(m.opts.imageFps)), value: $m.opts.imageFps, in: 1...6, step: 1)
                 VStack(alignment: .leading) {
-                    Text("Kvalita obrazu: \(Int(m.opts.jpegQuality * 100)) %")
+                    Text(TF("Image quality: %ld %%", Int(m.opts.jpegQuality * 100)))
                     Slider(value: $m.opts.jpegQuality, in: 0.2...0.9, step: 0.05)
                 }
             }
         }
-        .navigationTitle("Mapa v motorce")
+        .navigationTitle(T("Map on the bike"))
     }
 }
 
@@ -406,13 +414,35 @@ struct NavSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Vyhnout se dálnicím", isOn: $m.avoidHighways)
-                Toggle("Vyhnout se placeným úsekům", isOn: $m.avoidTolls)
+                Toggle(T("Avoid motorways"), isOn: $m.avoidHighways)
+                Toggle(T("Avoid tolls"), isOn: $m.avoidTolls)
             } footer: {
-                Text("Motorkářské trasy a hlasové pokyny do helmy připravujeme.")
+                Text(T("Motorcycle-friendly routes are planned for a later version."))
             }
         }
-        .navigationTitle("Navigace")
+        .navigationTitle(T("Navigation"))
+    }
+}
+
+struct VoiceSettingsView: View {
+    @EnvironmentObject var m: AppModel
+    var body: some View {
+        Form {
+            Section {
+                Toggle(T("Spoken instructions"), isOn: $m.voiceSettings.enabled)
+                Toggle(T("Street names in instructions"), isOn: $m.voiceSettings.streetNames)
+                    .disabled(!m.voiceSettings.enabled)
+                VStack(alignment: .leading) {
+                    Text(T("Volume"))
+                    Slider(value: $m.voiceSettings.volume, in: 0.2...1.0, step: 0.1)
+                }
+                .disabled(!m.voiceSettings.enabled)
+                Button(T("Play sample")) { m.voice.sample() }
+            } footer: {
+                Text(T("Instructions are spoken in the app language and play through your helmet intercom; music is lowered while speaking. Better voices can be downloaded in iPhone Settings → Accessibility → Spoken Content → Voices."))
+            }
+        }
+        .navigationTitle(T("Voice guidance"))
     }
 }
 
@@ -421,31 +451,31 @@ struct AssistSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Radary a úsekové měření", isOn: $m.assist.cameras)
-                Toggle("Školní zóny", isOn: $m.assist.schools)
-                Toggle("Hranice států", isOn: $m.assist.borders)
-                Toggle("Překročení rychlosti", isOn: $m.assist.speeding)
+                Toggle(T("Speed cameras and section control"), isOn: $m.assist.cameras)
+                Toggle(T("School zones"), isOn: $m.assist.schools)
+                Toggle(T("Country borders"), isOn: $m.assist.borders)
+                Toggle(T("Speeding"), isOn: $m.assist.speeding)
             } footer: {
-                Text("Data o radarech a rychlostních limitech doplníme v další verzi. Zatím si můžeš varování vyzkoušet níže.")
+                Text(T("Speed camera and speed limit data will be added in a later version. You can try the warnings below."))
             }
-            Section("Vyzkoušet na přístrojovce") {
+            Section(T("Try on the dashboard")) {
                 HStack {
-                    Button("Radar 50") { m.testWarning(0) }.buttonStyle(.bordered)
-                    Button("Úsekové 90") { m.testWarning(1) }.buttonStyle(.bordered)
-                    Button("Červená") { m.testWarning(2) }.buttonStyle(.bordered)
+                    Button(T("Camera 50")) { m.testWarning(0) }.buttonStyle(.bordered)
+                    Button(T("Section 90")) { m.testWarning(1) }.buttonStyle(.bordered)
+                    Button(T("Red light")) { m.testWarning(2) }.buttonStyle(.bordered)
                 }
                 HStack {
-                    Button("Mobilní") { m.testWarning(3) }.buttonStyle(.bordered)
-                    Button("Škola") { m.testWarning(4) }.buttonStyle(.bordered)
-                    Button("Hranice") { m.testWarning(5) }.buttonStyle(.bordered)
+                    Button(T("Mobile")) { m.testWarning(3) }.buttonStyle(.bordered)
+                    Button(T("School")) { m.testWarning(4) }.buttonStyle(.bordered)
+                    Button(T("Border")) { m.testWarning(5) }.buttonStyle(.bordered)
                 }
                 HStack {
-                    Button("Rychlost") { m.testWarning(6) }.buttonStyle(.bordered)
-                    Button("Zrušit vše", role: .destructive) { m.testWarning(9) }.buttonStyle(.bordered)
+                    Button(T("Speed")) { m.testWarning(6) }.buttonStyle(.bordered)
+                    Button(T("Clear all"), role: .destructive) { m.testWarning(9) }.buttonStyle(.bordered)
                 }
             }
         }
-        .navigationTitle("Asistence jezdce")
+        .navigationTitle(T("Rider assistance"))
     }
 }
 
@@ -456,13 +486,13 @@ struct FavoritesSettingsView: View {
     var body: some View {
         List {
             Section {
-                placeRow("Domů", "house.fill", m.places.home)
-                placeRow("Práce", "briefcase.fill", m.places.work)
+                placeRow(T("Home"), "house.fill", m.places.home)
+                placeRow(T("Work"), "briefcase.fill", m.places.work)
             } footer: {
-                Text("Domů a Práce se dají vybrat i v menu motorky. Nastavíš je přes vyhledání místa → Uložit.")
+                Text(T("Home and Work can also be chosen from the bike's menu. Set them by searching for a place → Save."))
             }
-            Section("Oblíbená místa") {
-                if m.places.others.isEmpty { Text("Zatím žádná").foregroundStyle(.secondary) }
+            Section(T("Favorite places")) {
+                if m.places.others.isEmpty { Text(T("None yet")).foregroundStyle(.secondary) }
                 ForEach(m.places.others) { p in
                     VStack(alignment: .leading) {
                         Text(p.name)
@@ -475,14 +505,14 @@ struct FavoritesSettingsView: View {
                 }
             }
             Section {
-                Button("Smazat historii hledání (\(m.places.history.count))", role: .destructive) { confirmHistory = true }
+                Button(TF("Clear search history (%ld)", m.places.history.count), role: .destructive) { confirmHistory = true }
                     .disabled(m.places.history.isEmpty)
             }
         }
-        .navigationTitle("Oblíbená místa")
-        .alert("Smazat historii hledání?", isPresented: $confirmHistory) {
-            Button("Smazat", role: .destructive) { m.clearHistory() }
-            Button("Zrušit", role: .cancel) {}
+        .navigationTitle(T("Favorite places"))
+        .alert(T("Clear search history?"), isPresented: $confirmHistory) {
+            Button(T("Clear"), role: .destructive) { m.clearHistory() }
+            Button(T("Cancel"), role: .cancel) {}
         }
     }
 
@@ -495,7 +525,7 @@ struct FavoritesSettingsView: View {
                 Button(role: .destructive) { m.removePlace(p) } label: { Image(systemName: "trash") }
                     .buttonStyle(.borderless)
             } else {
-                Text("nenastaveno").foregroundStyle(.secondary)
+                Text(T("not set")).foregroundStyle(.secondary)
             }
         }
     }
@@ -505,29 +535,29 @@ struct BikeView: View {
     @EnvironmentObject var m: AppModel
     var body: some View {
         List {
-            Section("Stav") {
-                row("Spojení", m.status.phase)
-                row("Přístrojovka", m.status.partNumber)
+            Section(T("Status")) {
+                row(T("Connection"), T(m.status.phase))
+                row(T("Dashboard"), m.status.partNumber)
                 row("Model", m.status.model.rawValue)
-                row("Režim", m.status.mode.rawValue)
-                row("Obraz", String(format: "%.1f fps · %ld kB", m.status.fps, m.status.lastKB))
+                row(T("Mode"), m.status.mode.rawValue)
+                row(T("Image"), String(format: "%.1f fps · %ld kB", m.status.fps, m.status.lastKB))
                 row("Zoom", m.status.zoomText)
             }
             Section {
                 HStack {
-                    Button("Připojit") { m.session.start() }.buttonStyle(.borderedProminent)
+                    Button(T("Connect")) { m.session.start() }.buttonStyle(.borderedProminent)
                     Spacer()
-                    Button("Odpojit", role: .destructive) { m.session.stop() }.buttonStyle(.bordered)
+                    Button(T("Disconnect"), role: .destructive) { m.session.stop() }.buttonStyle(.bordered)
                 }
-                Toggle("Automaticky připojit k motorce", isOn: $m.autoConnect)
+                Toggle(T("Connect to the bike automatically"), isOn: $m.autoConnect)
             }
-            Section("Příslušenství (MFi)") {
-                if m.accessories.isEmpty { Text("žádné").foregroundStyle(.secondary) }
+            Section(T("Accessories (MFi)")) {
+                if m.accessories.isEmpty { Text(T("none")).foregroundStyle(.secondary) }
                 ForEach(m.accessories, id: \.self) { Text($0).font(.caption) }
-                Button("Obnovit") { m.refreshAccessories() }
+                Button(T("Refresh")) { m.refreshAccessories() }
             }
         }
-        .navigationTitle("Motorka")
+        .navigationTitle(T("Bike"))
     }
 }
 
@@ -537,35 +567,66 @@ struct DiagnosticsView: View {
 
     var body: some View {
         List {
-            Section("Zdroj navigace") {
-                Picker("Zdroj", selection: $m.opts.navSource) {
+            Section(T("Navigation source")) {
+                Picker(T("Source"), selection: $m.opts.navSource) {
                     ForEach(NavSource.allCases) { Text($0.label).tag($0) }
                 }.pickerStyle(.segmented)
-                Toggle("Posílat obrázky", isOn: $m.opts.sendImages)
-                Toggle("Posílat navigační data", isOn: $m.opts.sendNavData)
-                Picker("Zpráva se šipkami", selection: $m.opts.navService) {
+                Toggle(T("Send images"), isOn: $m.opts.sendImages)
+                Toggle(T("Send navigation data"), isOn: $m.opts.sendNavData)
+                Picker(T("Turn message"), selection: $m.opts.navService) {
                     ForEach(NavServiceChoice.allCases) { Text($0.label).tag($0) }
                 }.pickerStyle(.segmented)
             }
-            Section("Stav") {
-                row("Mapa", m.status.mapStats.isEmpty ? "–" : m.status.mapStats)
+            Section(T("Status")) {
+                row(T("Map"), m.status.mapStats.isEmpty ? "–" : m.status.mapStats)
                 row("GPS", m.gpsText)
-                row("Poslední příchozí", m.status.lastRx)
+                row(T("Last received"), m.status.lastRx)
                 row("Self-test", m.selfTestSummary)
             }
-            if !m.routeSteps.isEmpty {
+            Section {
+                Toggle(T("Save log"), isOn: $logs.enabled)
+                NavigationLink { LogView() } label: { Label(T("Open log"), systemImage: "doc.text") }
+                NavigationLink { StepsView() } label: { Label(T("Show navigation steps"), systemImage: "list.number") }
+            } header: {
+                Text(T("Log"))
+            } footer: {
+                Text(T("Turn on before a test ride, then export the log and send it."))
+            }
+        }
+        .navigationTitle(T("Diagnostics"))
+    }
+}
+
+struct LogView: View {
+    @ObservedObject var logs = Log.shared
+    var body: some View {
+        List {
+            ForEach(Array(logs.lines.enumerated().reversed()), id: \.offset) { item in
+                Text(item.element).font(.system(size: 11, design: .monospaced))
+            }
+        }
+        .navigationTitle(T("Log"))
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                ShareLink(item: logs.exportText()) { Label(T("Export"), systemImage: "square.and.arrow.up") }
+            }
+        }
+    }
+}
+
+struct StepsView: View {
+    @EnvironmentObject var m: AppModel
+    var body: some View {
+        List {
+            if m.routeSteps.isEmpty {
+                Text(T("No route")).foregroundStyle(.secondary)
+            } else {
                 Section(m.routeSummary) {
                     ForEach(Array(m.routeSteps.enumerated()), id: \.offset) { s in Text(s.element).font(.caption) }
                 }
             }
-            Section("Log") {
-                ShareLink(item: Log.shared.fileURL) { Label("Exportovat celý log", systemImage: "square.and.arrow.up") }
-                ForEach(Array(logs.lines.enumerated().reversed()), id: \.offset) { item in
-                    Text(item.element).font(.system(size: 11, design: .monospaced))
-                }
-            }
         }
-        .navigationTitle("Diagnostika")
+        .navigationTitle(T("Navigation steps"))
     }
 }
 

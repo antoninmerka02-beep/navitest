@@ -39,11 +39,17 @@ final class RouteSimulator {
         }
     }
 
+    func turnList() -> [TurnItem] {
+        route.map { TurnItem(icon: $0.icon, leg: $0.length, label: $0.road) }
+    }
+
     func snapshot() -> NavSnapshot {
         var s = NavSnapshot()
         let m = route[index]
         s.icon = m.icon; s.toNext = toNext; s.road = m.road; s.text = m.text; s.lanes = m.lanes
         if TurnIcon.isRoundabout(m.icon) { s.rbExit = 2; s.rbAround = 180 }
+        s.street = m.road
+        if index + 1 < route.count { s.nextIcon = route[index + 1].icon; s.nextGap = route[index + 1].length }
         var remaining = toNext
         var items: [UpcomingItem] = [UpcomingItem(icon: m.icon, dist: toNext, text: m.text)]
         var acc = toNext

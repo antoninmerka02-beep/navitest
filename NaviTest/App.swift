@@ -64,11 +64,15 @@ struct SavedSettings: Codable {
     var avoidHighways = false
     var avoidTolls = false
     var assist = AssistSettings()
+    var language: AppLanguage = .en
+    var voice = VoiceSettings()
 
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = SavedSettings()
+        language = (try? c.decodeIfPresent(AppLanguage.self, forKey: .language)) ?? d.language
+        voice = (try? c.decodeIfPresent(VoiceSettings.self, forKey: .voice)) ?? d.voice
         opts = (try? c.decodeIfPresent(TestOptions.self, forKey: .opts)) ?? d.opts
         autoConnect = (try? c.decodeIfPresent(Bool.self, forKey: .autoConnect)) ?? d.autoConnect
         avoidHighways = (try? c.decodeIfPresent(Bool.self, forKey: .avoidHighways)) ?? d.avoidHighways
@@ -99,6 +103,10 @@ final class AppModel: ObservableObject {
     @Published var avoidHighways = false { didSet { saveSettings() } }
     @Published var avoidTolls = false { didSet { saveSettings() } }
     @Published var assist = AssistSettings() { didSet { saveSettings() } }
+    @Published var language: AppLanguage = .en {
+        didSet { L10n.lang = language; saveSettings(); pushBikeFavorites() }
+    }
+    @Published var voiceSettings = VoiceSettings() { didSet { voice.settings = voiceSettings; saveSettings() } }
     @Published var gpsText = "–"
 
     // Navigace
@@ -119,16 +127,21 @@ final class AppModel: ObservableObject {
     let snapshots = MapSnapshotProvider()
     lazy var session = DashSession(navigator: navigator, snapshots: snapshots)
     private let location = LocationService()
+    let voice = VoiceGuide()
     private var lastGpsUI = Date.distantPast
     private var bag = Set<AnyCancellable>()
 
     var currentLocation: CLLocation? { location.last }
-    var bikeConnected: Bool { status.phase == "Spojeno" }
+    var bikeConnected: Bool { status.phase == "Connected" }
     var version: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?" }
 
     init() {
-        log("NaviTest \(version) spuštěn, iOS \(UIDevice.current.systemVersion)")
         let saved = SavedSettings.load()
+        L10n.lang = saved.language
+        language = saved.language
+        voiceSettings = saved.voice
+        voice.settings = saved.voice
+        log("NaviTest \(version) spuštěn, iOS \(UIDevice.current.systemVersion), jazyk \(saved.language.rawValue)")
         opts = saved.opts
         autoConnect = saved.autoConnect
         avoidHighways = saved.avoidHighways
@@ -154,6 +167,10 @@ final class AppModel: ObservableObject {
         location.onLocation = { [weak self] loc in
             guard let self = self else { return }
             self.navigator.update(loc)
+            // Hlas jede z polohy – funguje i se zamčeným telefonem
+            if self.navigator.hasRoute, let snap = self.navigator.snapshot() {
+                self.voice.update(snap, speed: max(0, loc.speed))
+            }
             if Date().timeIntervalSince(self.lastGpsUI) > 1 {
                 self.lastGpsUI = Date()
                 self.gpsText = String(format: "±%.0f m · %.0f km/h · kurz %.0f°",
@@ -193,6 +210,8 @@ final class AppModel: ObservableObject {
         s.avoidHighways = avoidHighways
         s.avoidTolls = avoidTolls
         s.assist = assist
+        s.language = language
+        s.voice = voiceSettings
         s.save()
     }
 
@@ -205,11 +224,14 @@ final class AppModel: ObservableObject {
         avoidHighways = d.avoidHighways
         avoidTolls = d.avoidTolls
         assist = d.assist
+        language = d.language
+        voiceSettings = d.voice
+        Log.shared.enabled = false
         places.clearAll()
         pushBikeFavorites()
         session.resetZoom()
         log("♻️ Obnoveno tovární nastavení")
-        flash("Obnoveno tovární nastavení")
+        flash(T("Factory settings restored"))
     }
 
     func refreshAccessories() {
@@ -231,7 +253,7 @@ final class AppModel: ObservableObject {
             guard let self = self else { return }
             guard let item = resp?.mapItems.first else {
                 log("❌ Místo se nepodařilo dohledat: \(err?.localizedDescription ?? "?")")
-                self.flash("Místo se nepodařilo najít")
+                self.flash(T("Place could not be found"))
                 return
             }
             var p = Place.from(item)
@@ -244,21 +266,21 @@ final class AppModel: ObservableObject {
     func distanceText(to p: Place) -> String? {
         guard let here = currentLocation else { return nil }
         let d = here.distance(from: CLLocation(latitude: p.lat, longitude: p.lon))
-        return d < 1000 ? "\(Int(d / 10) * 10) m vzdušnou čarou" : String(format: "%.1f km vzdušnou čarou", d / 1000)
+        return d < 1000 ? TF("%ld m as the crow flies", Int(d / 10) * 10) : TF("%.1f km as the crow flies", d / 1000)
     }
 
     // MARK: Oblíbená místa
-    func setHome(_ p: Place) { places.setHome(p); pushBikeFavorites(); flash("Uloženo jako Domů") }
-    func setWork(_ p: Place) { places.setWork(p); pushBikeFavorites(); flash("Uloženo jako Práce") }
-    func addFavorite(_ p: Place) { places.addFavorite(p); pushBikeFavorites(); flash("Přidáno do oblíbených") }
+    func setHome(_ p: Place) { places.setHome(p); pushBikeFavorites(); flash(T("Saved as Home")) }
+    func setWork(_ p: Place) { places.setWork(p); pushBikeFavorites(); flash(T("Saved as Work")) }
+    func addFavorite(_ p: Place) { places.addFavorite(p); pushBikeFavorites(); flash(T("Added to favorites")) }
     func removePlace(_ p: Place) { places.remove(p); pushBikeFavorites() }
     func clearHistory() { places.clearHistory(); pushBikeFavorites() }
 
     /// Seznam pro přístrojovku: Domů, Práce, oblíbené, pak poslední cíle.
     private func pushBikeFavorites() {
         var list: [BikeFav] = []
-        if let h = places.home { list.append(BikeFav(name: "Domů", coordinate: h.coordinate, tag: "home")) }
-        if let w = places.work { list.append(BikeFav(name: "Práce", coordinate: w.coordinate, tag: "work")) }
+        if let h = places.home { list.append(BikeFav(name: T("Home"), coordinate: h.coordinate, tag: "home")) }
+        if let w = places.work { list.append(BikeFav(name: T("Work"), coordinate: w.coordinate, tag: "work")) }
         for p in places.others { list.append(BikeFav(name: p.name, coordinate: p.coordinate, tag: p.id.uuidString)) }
         for p in places.history.prefix(5) { list.append(BikeFav(name: p.name, coordinate: p.coordinate, tag: p.id.uuidString)) }
         session.setBikeFavorites(list, home: places.home != nil, office: places.work != nil)
@@ -301,17 +323,18 @@ final class AppModel: ObservableObject {
         req.highwayPreference = avoidHighways ? .avoid : .any
         req.tollPreference = avoidTolls ? .avoid : .any
         calculating = true
-        let name = destination?.name ?? dest.name ?? "Cíl"
+        let name = destination?.name ?? dest.name ?? T("Destination")
         MKDirections(request: req).calculate { [weak self] resp, err in
             guard let self = self else { return }
             self.calculating = false
             guard let route = resp?.routes.first else {
                 log("❌ Trasa (\(reason)): \(err?.localizedDescription ?? "žádná trasa")")
-                self.flash("Trasu se nepodařilo spočítat")
+                self.flash(T("Route could not be calculated"))
                 return
             }
             let r = NavRoute(route: route, destinationName: name)
             self.navigator.setRoute(r)
+            self.voice.routeStarted(generation: self.navigator.routeGeneration, reroute: reason == "přepočet")
             self.routeCoords = r.points.map { $0.coordinate }
             self.routeVersion += 1
             self.routeSummary = String(format: "%@ · %.1f km · %.0f min · %ld manévrů",
@@ -338,6 +361,7 @@ final class AppModel: ObservableObject {
         routeCoords = []
         routeVersion += 1
         guidance = nil
+        voice.reset()
         log("🛑 Navigace ukončena")
     }
 

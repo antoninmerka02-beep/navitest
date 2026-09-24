@@ -26,7 +26,7 @@ enum NavServiceChoice: String, CaseIterable, Identifiable, Codable {
 enum NavSource: String, CaseIterable, Identifiable, Codable {
     case sim, real
     var id: String { rawValue }
-    var label: String { self == .sim ? "Simulace" : "Skutečná" }
+    var label: String { self == .sim ? T("Simulation") : T("Real") }
 }
 
 struct TestOptions: Codable {
@@ -77,7 +77,7 @@ enum DashModel: String {
 }
 
 struct SessionStatus {
-    var phase = "Nepřipojeno"
+    var phase = "Not connected"
     var partNumber = "–"
     var model: DashModel = .unknown
     var mode: ContentMode = .none
@@ -134,7 +134,9 @@ final class DashSession {
     }()
     private var pendingZoomReset = false
     private var seq = 1
-    private var lastTbtIndex = -1
+    // Seznam odboček jako Garmin (TurnByTurnListUpdateManager)
+    private var tbtListStart = -1
+    private var tbtLastActive = -1
     private var lastSpeedLog = Date.distantPast
     private var lastGuiding: Bool? = nil
     private var lastLoggedSource: MapSource? = nil
@@ -156,7 +158,7 @@ final class DashSession {
         for a in accs { log("  • \(DashLink.describe(a))") }
         guard let acc = DashLink.findAccessory() else {
             log("❌ Žádné příslušenství s protokolem \(DashLink.proto). Zapalování, Bluetooth a navigace na přístrojovce?")
-            publish(phase: "Motorka nenalezena")
+            publish(phase: "Bike not found")
             return
         }
         setRunning(true)
@@ -200,7 +202,8 @@ final class DashSession {
         status = SessionStatus()
         mode = .none
         model = .unknown
-        lastTbtIndex = -1
+        tbtListStart = -1
+        tbtLastActive = -1
         lastGuiding = nil
         lastLoggedSource = nil
         lastRouteGen = -1
@@ -208,7 +211,7 @@ final class DashSession {
             link.close()
             setRunning(false)
             mode = .none
-            publish(phase: "Odpojeno")
+            publish(phase: "Disconnected")
             log("Session ukončena")
         }
         do {
@@ -221,7 +224,7 @@ final class DashSession {
         publish(phase: "Handshake…")
         guard handshake() else { return }
         mode = .map
-        publish(phase: "Spojeno")
+        publish(phase: "Connected")
         loop()
     }
 
@@ -316,7 +319,12 @@ final class DashSession {
                     if gen != lastRouteGen {
                         lastRouteGen = gen
                         sendRouteStart()
+                        tbtListStart = -1          // po startu trasy hned nový seznam odboček
                     }
+                    updateTurnList(n, o)
+                } else if tbtListStart != -1 || tbtLastActive != -1 {
+                    tbtListStart = -1
+                    tbtLastActive = -1
                 }
                 if o.sendNavData, let n = nav, n.guiding { sendNav(n, o) }
             }
@@ -427,7 +435,7 @@ final class DashSession {
                 send(zoomMessage(show: false))
             } else if ct == 2 {
                 mode = .tbt
-                lastTbtIndex = -1
+                tbtListStart = -1                  // seznam pošleme znovu
             } else if ct == 3 {
                 sendFavoritesList()
             }
@@ -502,14 +510,6 @@ final class DashSession {
         send(NL.speedLimit(s.speedLimit, unit: "km/h"))
         send(NL.eta(hour: s.etaHour, minute: s.etaMinute))
         status.navSent += 1
-
-        if mode == .tbt {
-            if s.maneuverIndex != lastTbtIndex { sendTbtList(s) }
-            else if let first = s.upcoming.first {
-                let (dd, uu) = formatDistance(first.dist)
-                send(NL.tbtItem(index: 0, icon: first.icon, dist: dd, unit: uu, text: first.text))
-            }
-        }
     }
 
     /// Pošle seznam oblíbených míst (Domů, Práce, oblíbené, poslední cíle) se vzdáleností a směrem.
@@ -536,15 +536,28 @@ final class DashSession {
         log("➡️ Oblíbená místa pro motorku: \(favs.count) (seznam \(favListIndex))")
     }
 
-    private func sendTbtList(_ s: NavSnapshot) {
-        lastTbtIndex = s.maneuverIndex
-        send(NL.tbtListUpdate(count: s.upcoming.count, hasMore: false))
-        for (i, item) in s.upcoming.enumerated() {
-            let (d, u) = formatDistance(item.dist)
-            send(NL.tbtItem(index: i, icon: item.icon, dist: d, unit: u, text: item.text))
+    /// Jako Garmin: během navigace vždy seznam odboček (okno max 50 od aktivní, globální indexy,
+    /// vzdálenost = úsek od předchozí odbočky) + index aktivní odbočky při každé změně.
+    private func updateTurnList(_ s: NavSnapshot, _ o: TestOptions) {
+        let items = o.navSource == .real ? navigator.turnList() : sim.turnList()
+        guard !items.isEmpty else { return }
+        let active = min(max(0, s.maneuverIndex), items.count - 1)
+        if tbtListStart == -1 || active < tbtListStart || active - tbtListStart >= 40 {
+            let end = min(items.count, active + 50)
+            send(NL.tbtListUpdate(count: end - active, hasMore: end < items.count))
+            for i in active..<end {
+                let it = items[i]
+                let (d, u) = formatDistance(it.leg)
+                send(NL.tbtItem(index: i, icon: it.icon, dist: d, unit: u, text: it.label))
+            }
+            tbtListStart = active
+            tbtLastActive = -1
+            log("➡️ Seznam odboček: položky \(active)–\(end - 1) z \(items.count)")
         }
-        send(NL.activeTbt(0))
-        log("➡️ Turn-by-turn seznam: \(s.upcoming.count) položek")
+        if active != tbtLastActive {
+            send(NL.activeTbt(active))
+            tbtLastActive = active
+        }
     }
 
     // MARK: Pomocné

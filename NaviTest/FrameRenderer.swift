@@ -9,8 +9,8 @@ enum MapSource: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .vector: return "Mapa OSM"
-        case .own: return "Jen trasa"
+        case .vector: return T("OSM map")
+        case .own: return T("Route only")
         case .apple: return "Apple"
         }
     }
@@ -177,7 +177,7 @@ final class FrameRenderer {
         let fg = p.dark ? CGColor(red: 1, green: 1, blue: 1, alpha: 0.7) : CGColor(red: 0, green: 0, blue: 0, alpha: 0.7)
         let src = p.mapSource == .apple ? (snap != nil ? "Apple" : "Apple čeká") : (p.mapSource == .vector ? "© OpenStreetMap" : "trasa")
         text(ctx, "#\(n) \(timeFmt.string(from: Date())) · \(src)", x: 6, y: 5, size: 10, color: fg, bold: false)
-        if !nav.guiding { text(ctx, "Volná jízda", x: 8, y: H - 22, size: 14, color: fg) }
+        if !nav.guiding { text(ctx, T("Free drive"), x: 8, y: H - 22, size: 14, color: fg) }
     }
 
     private func drawLabels(_ ctx: CGContext, _ labels: [PlacedLabel], toScreen: (CGPoint) -> CGPoint?,
@@ -306,7 +306,7 @@ final class FrameRenderer {
                       rbExit: nav.rbExit, rbAround: nav.rbAround)
         let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
         let dist: String
-        if nav.arrived { dist = "Cíl" } else {
+        if nav.arrived { dist = T("Destination") } else {
             let (d, u) = formatDistance(nav.toNext)
             dist = u == "m" ? "\(Int(d)) m" : String(format: "%.1f km", d)
         }
@@ -428,7 +428,7 @@ final class FrameRenderer {
         let yellow = CGColor(red: 0.85, green: 1.0, blue: 0.0, alpha: 1)
         text(ctx, "TEST #\(n)", x: W - 150, y: H - 56, size: 18, color: yellow)
         text(ctx, timeFmt.string(from: Date()), x: W - 100, y: H - 28, size: 18, color: white)
-        if nav == nil { text(ctx, "Čekám na polohu…", x: 190, y: 20, size: 16, color: white) }
+        if nav == nil { text(ctx, T("Waiting for location…"), x: 190, y: 20, size: 16, color: white) }
     }
 
     private func text(_ ctx: CGContext, _ s: String, x: CGFloat, y: CGFloat, size: CGFloat, color: CGColor,

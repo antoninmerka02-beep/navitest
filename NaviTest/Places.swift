@@ -30,7 +30,7 @@ struct Place: Codable, Identifiable, Equatable {
         let pm = item.placemark
         let street = [pm.thoroughfare, pm.subThoroughfare].compactMap { $0 }.joined(separator: " ")
         let sub = [street.isEmpty ? nil : street, pm.locality].compactMap { $0 }.joined(separator: ", ")
-        return Place(kind: kind, name: item.name ?? (street.isEmpty ? "Místo" : street), subtitle: sub,
+        return Place(kind: kind, name: item.name ?? (street.isEmpty ? T("Place") : street), subtitle: sub,
                      lat: pm.coordinate.latitude, lon: pm.coordinate.longitude)
     }
 }

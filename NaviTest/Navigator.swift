@@ -7,6 +7,7 @@ struct RouteManeuver {
     let road: String
     let text: String
     let coordinate: CLLocationCoordinate2D
+    var street: String = ""          // čistý název ulice pro hlas (může být prázdný)
     var rbExit: Int = 0
     var rbAround: Double = 180
 }
@@ -52,10 +53,12 @@ final class NavRoute {
 
         var man: [RouteManeuver] = []
         let steps = route.steps
-        for (i, step) in steps.enumerated() where i > 0 {
+        for (i, step) in steps.enumerated() {
             let text = step.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
             if text.isEmpty { continue }
-            let idx = min(stepStart[i], pts.count - 1)
+            // MapKit: pokyn kroku platí na jeho KONCI (= začátek dalšího kroku), u posledního na konci trasy
+            let endIdx = i + 1 < stepStart.count ? stepStart[i + 1] : pts.count - 1
+            let idx = min(max(0, endIdx), pts.count - 1)
             let at = c[idx]
             let isLast = i == steps.count - 1
             let delta = NavRoute.turnDelta(points: pts, cum: c, at: at)
@@ -79,10 +82,11 @@ final class NavRoute {
                 rbExit = NavRoute.exitNumber(text)
             }
             man.append(RouteManeuver(at: at, icon: icon, road: NavRoute.roadName(text), text: text,
-                                     coordinate: pts[idx].coordinate, rbExit: rbExit, rbAround: rbAround))
+                                     coordinate: pts[idx].coordinate, street: NavRoute.streetName(text),
+                                     rbExit: rbExit, rbAround: rbAround))
         }
         if man.last.map({ $0.icon > 2 }) ?? true {
-            man.append(RouteManeuver(at: total, icon: TurnIcon.arriving, road: destinationName, text: "Cíl",
+            man.append(RouteManeuver(at: total, icon: TurnIcon.arriving, road: destinationName, text: T("Destination"),
                                      coordinate: pts[pts.count - 1].coordinate))
         }
         maneuvers = man
@@ -169,7 +173,7 @@ final class NavRoute {
         if t.contains("sjeď") || t.contains("sjezd") || t.contains("výjezd") || t.contains("exit") || t.contains("ramp") {
             return goLeft ? TurnIcon.exitL : TurnIcon.exitR
         }
-        if t.contains("držte") || t.contains("keep") || t.contains("mírně") || t.contains("slight") || (t.contains("pokrač") && (left || right)) {
+        if t.contains("držte") || t.contains("keep") || t.contains("mírně") || t.contains("slight") || t.contains("bear") || (t.contains("pokrač") && (left || right)) {
             return goLeft ? TurnIcon.keepL : TurnIcon.keepR
         }
         let a = abs(delta)
@@ -184,11 +188,34 @@ final class NavRoute {
         return TurnIcon.uturnL
     }
 
-    /// „… 2. výjezdem …“ → 2
+    /// Číslo výjezdu z kruháče: „2. výjezdem“, „prvním výjezdem“, „take the 2nd exit“, „second exit“ → číslo, jinak 0.
     static func exitNumber(_ text: String) -> Int {
-        guard let r = text.range(of: #"\d+\.\s*výjezd"#, options: .regularExpression) else { return 0 }
-        let digits = text[r].prefix { $0.isNumber }
-        return Int(digits) ?? 0
+        let t = text.lowercased()
+        if let r = t.range(of: #"\d+\.\s*výjezd"#, options: .regularExpression)
+            ?? t.range(of: #"\d+(st|nd|rd|th)\s+exit"#, options: .regularExpression) {
+            return Int(t[r].prefix { $0.isNumber }) ?? 0
+        }
+        let words: [(String, Int)] = [
+            ("první", 1), ("druh", 2), ("třetí", 3), ("čtvrt", 4), ("pát", 5), ("šest", 6),
+            ("first exit", 1), ("second exit", 2), ("third exit", 3), ("fourth exit", 4), ("fifth exit", 5), ("sixth exit", 6),
+        ]
+        if t.contains("výjezd") || t.contains("exit") {
+            for (w, n) in words where t.contains(w) { return n }
+        }
+        return 0
+    }
+
+    /// Čistý název ulice („… na Nábřeží“ / „… onto Main St“), jinak prázdný řetězec.
+    static func streetName(_ text: String) -> String {
+        for sep in [" na ", " onto ", " on "] {
+            if let r = text.range(of: sep, options: .backwards) {
+                var s = String(text[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                for p in ["ulici ", "silnici ", "ulice "] where s.lowercased().hasPrefix(p) { s = String(s.dropFirst(p.count)) }
+                if let comma = s.firstIndex(of: ",") { s = String(s[..<comma]) }
+                return s
+            }
+        }
+        return ""
     }
 
     static func roadName(_ text: String) -> String {
@@ -286,6 +313,18 @@ final class Navigator {
         return best
     }
 
+    /// Celý seznam odboček trasy pro přístrojovku (globální index = pořadí), vzdálenost = úsek od předchozí odbočky.
+    func turnList() -> [TurnItem] {
+        lock.lock(); defer { lock.unlock() }
+        guard let r = route else { return [] }
+        var prev = 0.0
+        return r.maneuvers.map { m in
+            let leg = max(0, m.at - prev)
+            prev = m.at
+            return TurnItem(icon: m.icon, leg: leg, label: m.street.isEmpty ? m.road : m.street)
+        }
+    }
+
     func snapshot() -> NavSnapshot? {
         lock.lock(); defer { lock.unlock() }
         guard let r = route else {
@@ -313,6 +352,12 @@ final class Navigator {
         s.maneuverIndex = idx
         s.rbExit = m.rbExit
         s.rbAround = m.rbAround
+        s.street = m.street
+        if idx + 1 < r.maneuvers.count {
+            let nx = r.maneuvers[idx + 1]
+            s.nextIcon = nx.icon
+            s.nextGap = nx.at - m.at
+        }
         if let loc = lastLocation {
             s.position = matchDist < 40 ? r.point(at: along).coordinate : loc.coordinate
         }

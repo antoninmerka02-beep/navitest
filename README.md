@@ -1,10 +1,15 @@
-# NaviTest R9 – verze 0.6
+# NaviTest R9 – version 0.7
 
-- Start trasy jako Garmin: při spuštění, přepočtu i novém připojení dostane přístrojovka
-  průběh výpočtu trasy (0 → 100 % → hotovo), „naviguji“ a počet průjezdních bodů.
-  Cíl: šipka v levém sloupci přístrojovky a funkční Change View → Turn-by-Turn / Turn List.
-  (Posílá se i v simulaci, takže se dá zkoušet doma.)
-- 3D pohled (Nastavení → Mapa v motorce → Pohled 2D/3D): nakloněná mapa, vidíš ~5× dál dopředu.
-- Názvy ulic podél silnic při přiblížení (lze vypnout).
+Navigation fixes
+- Maneuvers placed at the END of each Apple Maps step (instructions were one step early; roundabout
+  exits and "current road" were affected too).
+- Turn list + active turn index sent to the dashboard during navigation, like Garmin StreetCross
+  (after route start, on connect, every 40 turns; global indices, leg distance, street name).
 
-Mapová data © přispěvatelé OpenStreetMap, dlaždice OpenFreeMap, © OpenMapTiles.
+New
+- English (default) and Czech UI – Settings → Language.
+- Voice guidance (built-in iPhone text-to-speech), timing based on speed, street names,
+  roundabout exits, "then …" for close turns, recalculation and arrival. Settings → Voice guidance.
+- Log: saving off by default (Diagnostics → Save log), "Open log" with export, navigation steps on a separate page.
+
+Map data © OpenStreetMap contributors, OpenFreeMap, © OpenMapTiles.

@@ -12,6 +12,7 @@ enum TurnIcon {
     static let uturnL: UInt8 = 36, uturnR: UInt8 = 37
 
     static func isRoundabout(_ i: UInt8) -> Bool { i >= 14 && i <= 31 }
+    static func isArrival(_ i: UInt8) -> Bool { i <= 5 }
 
     /// SF Symbol pro panel v telefonu.
     static func symbol(_ i: UInt8) -> String {
@@ -38,16 +39,32 @@ enum TurnIcon {
 
     static func name(_ i: UInt8) -> String {
         switch i {
-        case 0: return "cíl"; case 1: return "cíl vlevo"; case 2: return "cíl vpravo"
-        case 6: return "držet vlevo"; case 7: return "držet vpravo"; case 8: return "rovně"
-        case 10: return "sjezd vlevo"; case 11: return "sjezd vpravo"; case 14: return "kruháč"
-        case 15...22: return "kruháč \(Int(i - 14) * 45)°"
-        case 32: return "ostře vlevo"; case 33: return "ostře vpravo"
-        case 34: return "vlevo"; case 35: return "vpravo"
-        case 36: return "otočka"; case 37: return "otočka P"
-        default: return "ikona \(i)"
+        case 0: return T("destination")
+        case 1: return T("destination on the left")
+        case 2: return T("destination on the right")
+        case 6: return T("keep left")
+        case 7: return T("keep right")
+        case 8: return T("straight")
+        case 10: return T("exit left")
+        case 11: return T("exit right")
+        case 14: return T("roundabout")
+        case 15...22: return TF("roundabout %ld°", Int(i - 14) * 45)
+        case 32: return T("sharp left")
+        case 33: return T("sharp right")
+        case 34: return T("left")
+        case 35: return T("right")
+        case 36: return T("U-turn")
+        case 37: return T("U-turn right")
+        default: return TF("icon %ld", Int(i))
         }
     }
+}
+
+/// Položka seznamu odboček pro přístrojovku.
+struct TurnItem {
+    let icon: UInt8
+    let leg: Double        // metry od předchozí odbočky
+    let label: String
 }
 
 struct UpcomingItem {
@@ -73,6 +90,9 @@ struct NavSnapshot {
     var upcoming: [UpcomingItem] = []
     var maneuverIndex: Int = 0
     var arrived = false
+    var street: String = ""          // čistý název ulice (pro hlas)
+    var nextIcon: UInt8? = nil       // následující manévr (pro „poté …“)
+    var nextGap: Double = 0          // vzdálenost mezi aktuálním a následujícím manévrem
     var rbExit: Int = 0              // kruháč: číslo výjezdu (0 = neznámé)
     var rbAround: Double = 180       // kruháč: úhel objetý po kruhu
     // Pro kreslení mapy (skutečná navigace)
