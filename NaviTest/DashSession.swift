@@ -39,7 +39,9 @@ struct TestOptions: Codable {
     var mapSource: MapSource = .vector
     var turnBox = true                // vlastní šipka + vzdálenost v obrázku
     var northUp = false
-    var darkMap = true
+    var darkMap = true                // (starší volba, nahrazena dayNight)
+    var dayNight: DayNightMode = .auto
+    var tileURL: String = ""          // prázdné = OpenFreeMap
     var threeD = false                // 3D (nakloněný) pohled
     var streetNames = true            // názvy ulic podél silnic
 
@@ -59,6 +61,8 @@ struct TestOptions: Codable {
         turnBox = (try? c.decodeIfPresent(Bool.self, forKey: .turnBox)) ?? d.turnBox
         northUp = (try? c.decodeIfPresent(Bool.self, forKey: .northUp)) ?? d.northUp
         darkMap = (try? c.decodeIfPresent(Bool.self, forKey: .darkMap)) ?? d.darkMap
+        dayNight = (try? c.decodeIfPresent(DayNightMode.self, forKey: .dayNight)) ?? d.dayNight
+        tileURL = (try? c.decodeIfPresent(String.self, forKey: .tileURL)) ?? d.tileURL
         threeD = (try? c.decodeIfPresent(Bool.self, forKey: .threeD)) ?? d.threeD
         streetNames = (try? c.decodeIfPresent(Bool.self, forKey: .streetNames)) ?? d.streetNames
     }
@@ -122,6 +126,14 @@ final class DashSession {
     // Seznam, který motorka právě zobrazuje (jen pracovní vlákno)
     private var favListIndex = 1
     private var favsSent: [BikeFav] = []
+    private var listKind = "fav"            // který seznam motorka právě ukazuje (fav / gas)
+    private var pendingGas: [BikeFav]? = nil
+    /// Motorka chce čerpací stanice – hlavní vlákno je najde a předá přes provideGasStations.
+    var onGasRequest: (() -> Void)?
+    // Den / noc
+    private var night = false
+    private var lastNightCheck = Date.distantPast
+    private var nightSent: Bool? = nil
 
     // Stav, se kterým pracuje jen pracovní vlákno
     private var status = SessionStatus()
@@ -189,6 +201,11 @@ final class DashSession {
         lock.unlock()
     }
 
+    /// Nalezené čerpací stanice (z hlavního vlákna) – odešlou se při nejbližší příležitosti.
+    func provideGasStations(_ list: [BikeFav]) {
+        lock.lock(); pendingGas = list; lock.unlock()
+    }
+
     /// Tovární reset zoomu (provede pracovní vlákno).
     func resetZoom() { lock.lock(); pendingZoomReset = true; lock.unlock() }
 
@@ -244,7 +261,9 @@ final class DashSession {
         guard let ack = NL.secDataAck(seed: sec.payload) else { log("❌ Vadné SEC_DATA"); return false }
         send(ack)
         send(NL.flag(2, false))
-        send(NL.dayNight(1))
+        night = computeNight(options)
+        nightSent = night
+        send(NL.dayNight(night ? 2 : 1))
         lock.lock(); let h = homeSet, w = officeSet; lock.unlock()
         send(NL.flag(10, h))                       // je nastaven Domov
         send(NL.flag(11, w))                       // je nastavena Práce
@@ -298,6 +317,17 @@ final class DashSession {
                 status.zoomText = zoomLabel()
             }
             for m in q { send(m); log("➡️ \(NL.name(m.svc)) [\(m.payload.hex)]") }
+            lock.lock(); let gas = pendingGas; pendingGas = nil; lock.unlock()
+            if let g = gas { sendPoiList(g, kind: "gas") }
+            if Date().timeIntervalSince(lastNightCheck) > 30 {
+                lastNightCheck = Date()
+                night = computeNight(options)
+                if nightSent != night {
+                    nightSent = night
+                    send(NL.dayNight(night ? 2 : 1))
+                    log(night ? "🌙 Noc" : "☀️ Den")
+                }
+            }
 
             let now = Date()
             let o = options
@@ -336,7 +366,9 @@ final class DashSession {
                     ackTimeouts += 1
                     log("⚠️ IMAGE_ACK nepřišel do 3 s (\(ackTimeouts)× po sobě)")
                 }
-                if !awaitingAck && now.timeIntervalSince(lastImage) >= 1.0 / max(0.5, o.imageFps) {
+                if !awaitingAck && now.timeIntervalSince(lastImage) >= 1.0 / min(20, max(0.5, o.imageFps)) {
+                    // čerstvý snímek navigace pro každý obrázek – poloha se mezi GPS údaji dopočítává
+                    if o.navSource == .real { nav = navigator.snapshot() }
                     if o.mapSource != lastLoggedSource {
                         log("🖼️ Podklad mapy: \(o.mapSource.label)")
                         lastLoggedSource = o.mapSource
@@ -345,14 +377,14 @@ final class DashSession {
                     p.quality = o.jpegQuality
                     p.mpp = mpp()
                     p.northUp = o.northUp
-                    p.dark = o.darkMap
+                    p.dark = night
                     p.mapSource = o.mapSource
                     p.turnBox = o.turnBox
                     p.threeD = o.threeD
                     p.streetNames = o.streetNames
                     var snap: MapSnapshotProvider.Snap? = nil
                     if o.mapSource == .apple, let pos = nav?.position {
-                        snapshots.ensure(center: pos, mpp: p.mpp, dark: o.darkMap)
+                        snapshots.ensure(center: pos, mpp: p.mpp, dark: night)
                         snap = snapshots.latest()
                     }
                     if let jpg = renderer.render(frame: seq, nav: nav, p: p, snap: snap) {
@@ -433,11 +465,18 @@ final class DashSession {
                 mode = .map
                 send(NL.flag(2, lastGuiding ?? false)); send(NL.flag(13, true)); send(NL.flag(12, true))
                 send(zoomMessage(show: false))
+                send(NL.dayNight(night ? 2 : 1))
+                if lastGuiding == true { lastRouteGen = -1 }   // start trasy a seznam odboček znovu
             } else if ct == 2 {
                 mode = .tbt
-                tbtListStart = -1                  // seznam pošleme znovu
+                if lastGuiding == true { lastRouteGen = -1 }
+                tbtListStart = -1
             } else if ct == 3 {
                 sendFavoritesList()
+            } else if ct == 4 {
+                log("⛽ Motorka chce čerpací stanice – hledám…")
+                let cb = onGasRequest
+                DispatchQueue.main.async { cb?() }
             }
             publish()
         case 56:
@@ -460,7 +499,7 @@ final class DashSession {
             let list = Int(f.payload[2]) | Int(f.payload[3]) << 8
             if list == favListIndex && item < favsSent.count {
                 let fav = favsSent[item]
-                log("🏁 Vybráno na motorce: \(fav.name)")
+                log("🏁 Vybráno na motorce (\(listKind)): \(fav.name)")
                 let cb = onBikeNavigate
                 DispatchQueue.main.async { cb?(fav) }
             } else {
@@ -502,11 +541,11 @@ final class DashSession {
             }
         }
         if use19 {
-            send(NL.navInfo(icon: s.icon, dist: d, unit: u, road: s.road,
+            send(NL.navInfo(icon: s.icon, dist: d, unit: u, road: dashText(s.road),
                             remain: rd, remainUnit: ru, minutes: s.minutesLeft, lanes: s.lanes))
         }
-        if use4 { send(NL.nextTurn(icon: s.icon, dist: d, unit: u, road: s.road)) }
-        send(NL.currentRoad(s.currentRoad))
+        if use4 { send(NL.nextTurn(icon: s.icon, dist: d, unit: u, road: dashText(s.road))) }
+        send(NL.currentRoad(dashText(s.currentRoad)))
         send(NL.speedLimit(s.speedLimit, unit: "km/h"))
         send(NL.eta(hour: s.etaHour, minute: s.etaMinute))
         status.navSent += 1
@@ -515,9 +554,23 @@ final class DashSession {
     /// Pošle seznam oblíbených míst (Domů, Práce, oblíbené, poslední cíle) se vzdáleností a směrem.
     private func sendFavoritesList() {
         lock.lock(); let favs = bikeFavs; lock.unlock()
+        sendPoiList(favs, kind: "fav")
+    }
+
+    private func computeNight(_ o: TestOptions) -> Bool {
+        switch o.dayNight {
+        case .day: return false
+        case .night: return true
+        case .auto: return isNight(at: navigator.location?.coordinate)
+        }
+    }
+
+    /// Seznam míst pro přístrojovku – oblíbená (7/98) nebo čerpací stanice (8/99), stejný formát.
+    private func sendPoiList(_ favs: [BikeFav], kind: String) {
         favListIndex = 1 - favListIndex          // jako Garmin: seznamy 0/1 se střídají
         favsSent = favs
-        send(NL.favPoiUpdate(count: favs.count))
+        listKind = kind
+        send(kind == "gas" ? NL.gasPoiUpdate(count: favs.count) : NL.favPoiUpdate(count: favs.count))
         let here = navigator.location
         let heading = navigator.snapshot()?.heading ?? max(0, here?.course ?? 0)
         for (i, f) in favs.enumerated() {
@@ -531,9 +584,12 @@ final class DashSession {
                 dir = UInt8((Int((rel / 45).rounded()) % 8) + 1)
             }
             let (d, u) = formatDistance(dist)
-            send(NL.favPoiData(list: favListIndex, item: i, direction: dir, dist: d, unit: u, name: f.name))
+            let name = dashText(f.name)
+            send(kind == "gas"
+                 ? NL.gasPoiData(list: favListIndex, item: i, direction: dir, dist: d, unit: u, name: name)
+                 : NL.favPoiData(list: favListIndex, item: i, direction: dir, dist: d, unit: u, name: name))
         }
-        log("➡️ Oblíbená místa pro motorku: \(favs.count) (seznam \(favListIndex))")
+        log("➡️ \(kind == "gas" ? "Čerpací stanice" : "Oblíbená místa") pro motorku: \(favs.count) (seznam \(favListIndex))")
     }
 
     /// Jako Garmin: během navigace vždy seznam odboček (okno max 50 od aktivní, globální indexy,
@@ -548,7 +604,7 @@ final class DashSession {
             for i in active..<end {
                 let it = items[i]
                 let (d, u) = formatDistance(it.leg)
-                send(NL.tbtItem(index: i, icon: it.icon, dist: d, unit: u, text: it.label))
+                send(NL.tbtItem(index: i, icon: it.icon, dist: d, unit: u, text: dashText(it.label)))
             }
             tbtListStart = active
             tbtLastActive = -1

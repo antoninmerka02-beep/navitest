@@ -98,7 +98,13 @@ final class AppModel: ObservableObject {
     @Published var accessories: [String] = []
     @Published var selfTestSummary = ""
     @Published var selfTestLines: [String] = []
-    @Published var opts = TestOptions() { didSet { session.options = opts; saveSettings() } }
+    @Published var opts = TestOptions() {
+        didSet {
+            session.options = opts
+            saveSettings()
+            if opts.tileURL != oldValue.tileURL { TileStore.shared.configure(url: opts.tileURL) }
+        }
+    }
     @Published var autoConnect = true { didSet { saveSettings() } }
     @Published var avoidHighways = false { didSet { saveSettings() } }
     @Published var avoidTolls = false { didSet { saveSettings() } }
@@ -120,6 +126,9 @@ final class AppModel: ObservableObject {
     @Published var calculating = false
     @Published var recenterToken = 0
     @Published var toast: String? = nil
+    @Published var searchResults: [Place] = []
+    @Published var searchingNearby = false
+    @Published var phoneNight = false
 
     let places = PlacesStore()
     let completer = SearchCompleter()
@@ -178,7 +187,8 @@ final class AppModel: ObservableObject {
             }
         }
         location.start()
-        _ = TileStore.shared
+        TileStore.shared.configure(url: opts.tileURL)
+        session.onGasRequest = { [weak self] in self?.searchGasForBike() }
         pushBikeFavorites()
 
         EAAccessoryManager.shared().registerForLocalNotifications()
@@ -249,9 +259,19 @@ final class AppModel: ObservableObject {
     func select(_ s: Suggestion) {
         if let p = s.place { selectedPlace = p; return }
         guard let c = s.completion else { return }
-        MKLocalSearch(request: MKLocalSearch.Request(completion: c)).start { [weak self] resp, err in
+        let req = MKLocalSearch.Request(completion: c)
+        if let l = currentLocation {
+            req.region = MKCoordinateRegion(center: l.coordinate, latitudinalMeters: 40_000, longitudinalMeters: 40_000)
+        }
+        MKLocalSearch(request: req).start { [weak self] resp, err in
             guard let self = self else { return }
-            guard let item = resp?.mapItems.first else {
+            let items = resp?.mapItems ?? []
+            if items.count > 1 {
+                // Řetězec / kategorie (např. Kaufland) → všechny pobočky v okolí od nejbližší
+                self.showResults(items.map { Place.from($0) })
+                return
+            }
+            guard let item = items.first else {
                 log("❌ Místo se nepodařilo dohledat: \(err?.localizedDescription ?? "?")")
                 self.flash(T("Place could not be found"))
                 return
@@ -261,6 +281,122 @@ final class AppModel: ObservableObject {
             if !s.subtitle.isEmpty { p.subtitle = s.subtitle }
             self.selectedPlace = p
         }
+    }
+
+    /// Potvrzení hledání bez výběru návrhu: všechny výsledky v okolí jako seznam a špendlíky.
+    func searchNearby(_ query: String) {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return }
+        let req = MKLocalSearch.Request()
+        req.naturalLanguageQuery = q
+        if let l = currentLocation {
+            req.region = MKCoordinateRegion(center: l.coordinate, latitudinalMeters: 40_000, longitudinalMeters: 40_000)
+        }
+        searchingNearby = true
+        MKLocalSearch(request: req).start { [weak self] resp, err in
+            guard let self = self else { return }
+            self.searchingNearby = false
+            let items = resp?.mapItems ?? []
+            if items.isEmpty { self.flash(T("No results")); return }
+            if items.count == 1 { self.selectedPlace = Place.from(items[0]); return }
+            self.showResults(items.map { Place.from($0) })
+        }
+    }
+
+    private func showResults(_ places: [Place]) {
+        selectedPlace = nil
+        searchResults = sortedByDistance(places)
+        log("🔎 Výsledků v okolí: \(searchResults.count)")
+    }
+
+    func clearResults() { searchResults = [] }
+
+    func sortedByDistance(_ ps: [Place]) -> [Place] {
+        guard let here = currentLocation else { return ps }
+        return ps.sorted {
+            here.distance(from: CLLocation(latitude: $0.lat, longitude: $0.lon)) <
+            here.distance(from: CLLocation(latitude: $1.lat, longitude: $1.lon))
+        }
+    }
+
+    /// Klepnutí na místo v mapě telefonu (obchod, benzínka…).
+    func selectMapItem(_ item: MKMapItem) {
+        selectedPlace = Place.from(item)
+    }
+
+    /// Podržení prstu v mapě: špendlík s adresou.
+    func dropPin(at c: CLLocationCoordinate2D) {
+        var p = Place(kind: .history, name: T("Dropped pin"), subtitle: "", lat: c.latitude, lon: c.longitude)
+        selectedPlace = p
+        CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: c.latitude, longitude: c.longitude)) { [weak self] pms, _ in
+            guard let self = self, let pm = pms?.first, self.selectedPlace?.id == p.id else { return }
+            let street = [pm.thoroughfare, pm.subThoroughfare].compactMap { $0 }.joined(separator: " ")
+            p.name = street.isEmpty ? (pm.name ?? p.name) : street
+            p.subtitle = pm.locality ?? ""
+            self.selectedPlace = p
+        }
+    }
+
+    // MARK: Čerpací stanice pro motorku
+    private var gasSearchToken = 0
+    private var gasAnswered = false
+
+    /// Motorka chce „Nearby Gas Stations“: Apple Mapy (funguje i se zamčeným telefonem);
+    /// když neodpoví do 8 s nebo nic nenajdou, vezmou se čerpací stanice z uložených map.
+    private func searchGasForBike() {
+        guard let here = currentLocation else {
+            session.provideGasStations([])
+            log("⛽ Bez polohy – prázdný seznam")
+            return
+        }
+        gasSearchToken += 1
+        let token = gasSearchToken
+        gasAnswered = false
+        let req = MKLocalPointsOfInterestRequest(center: here.coordinate, radius: 15_000)
+        req.pointOfInterestFilter = MKPointOfInterestFilter(including: [.gasStation])
+        MKLocalSearch(request: req).start { [weak self] resp, err in
+            guard let self = self else { return }
+            let items = resp?.mapItems ?? []
+            if items.isEmpty {
+                if let err = err { log("⚠️ Apple hledání čerpacích stanic: \(err.localizedDescription)") }
+                self.gasFallback(token: token, here: here)
+            } else {
+                self.finishGas(items.map { BikeFav(name: $0.name ?? "⛽", coordinate: $0.placemark.coordinate, tag: "gas") },
+                               source: "Apple", token: token, here: here)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            self?.gasFallback(token: token, here: here)
+        }
+    }
+
+    private func gasFallback(token: Int, here: CLLocation) {
+        guard token == gasSearchToken, !gasAnswered else { return }
+        let osm = TileStore.shared.fuelStations(near: here.coordinate)
+        finishGas(osm.map { BikeFav(name: $0.name, coordinate: $0.coordinate, tag: "gas") },
+                  source: "OpenStreetMap", token: token, here: here)
+    }
+
+    private func finishGas(_ list: [BikeFav], source: String, token: Int, here: CLLocation) {
+        guard token == gasSearchToken, !gasAnswered else { return }
+        gasAnswered = true
+        let sorted = list.sorted {
+            here.distance(from: CLLocation(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)) <
+            here.distance(from: CLLocation(latitude: $1.coordinate.latitude, longitude: $1.coordinate.longitude))
+        }
+        session.provideGasStations(Array(sorted.prefix(20)))
+        log("⛽ Čerpací stanice (\(source)): \(min(20, sorted.count))")
+    }
+
+    // MARK: Den / noc v telefonu
+    func refreshNight() {
+        let n: Bool
+        switch opts.dayNight {
+        case .day: n = false
+        case .night: n = true
+        case .auto: n = isNight(at: currentLocation?.coordinate)
+        }
+        if n != phoneNight { phoneNight = n }
     }
 
     func distanceText(to p: Place) -> String? {
@@ -425,6 +561,10 @@ final class AppModel: ObservableObject {
 struct NaviTestApp: App {
     @StateObject private var model = AppModel()
     var body: some Scene {
-        WindowGroup { MainView().environmentObject(model) }
+        WindowGroup {
+            MainView()
+                .environmentObject(model)
+                .preferredColorScheme(model.phoneNight ? .dark : .light)
+        }
     }
 }

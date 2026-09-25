@@ -35,6 +35,8 @@
 	<string>Poloha drží aplikaci běžící na pozadí, aby mohla posílat navigaci do motorky.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Poloha drží aplikaci běžící na pozadí, aby mohla posílat navigaci do motorky.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Only needed for the “as phone call” voice mode; the microphone is never used. / Potřebné jen pro hlasový režim „jako hovor“, mikrofon se nepoužívá.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

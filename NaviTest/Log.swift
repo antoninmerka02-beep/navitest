@@ -10,7 +10,7 @@ final class Log: ObservableObject {
     @Published var enabled: Bool {
         didSet {
             UserDefaults.standard.set(enabled, forKey: Log.enabledKey)
-            if enabled { add("📝 Ukládání logu zapnuto") }
+            if enabled { add("📝 Ukládání logu zapnuto") } else { DispatchQueue.main.async { self.lines.removeAll() } }
         }
     }
     let fileURL: URL
@@ -29,8 +29,9 @@ final class Log: ObservableObject {
     }
 
     func add(_ s: String) {
+        guard enabled else { return }        // vypnuto = nic se neukládá ani nedrží v paměti
         let url = fileURL
-        let toFile = enabled
+        let toFile = true
         queue.async {
             let line = "\(self.timeFmt.string(from: Date()))  \(s)"
             if toFile {

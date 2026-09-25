@@ -101,6 +101,7 @@ struct NavSnapshot {
     var routeAhead: [CLLocationCoordinate2D] = []
     var routeBehind: [CLLocationCoordinate2D] = []
     var maneuverPoint: CLLocationCoordinate2D? = nil
+    var destination: CLLocationCoordinate2D? = nil
 }
 
 /// Vzdálenost na hodnotu + jednotku jako StreetCross (m pod 1 km, jinak km).
@@ -112,4 +113,57 @@ func formatDistance(_ meters: Double) -> (Float, String) {
 func etaComponents(secondsFromNow: Double) -> (Int, Int) {
     let c = Calendar.current.dateComponents([.hour, .minute], from: Date().addingTimeInterval(secondsFromNow))
     return (c.hour ?? 0, c.minute ?? 0)
+}
+
+// MARK: - Den / noc podle slunce (NOAA, přesnost na pár minut stačí)
+/// Výška slunce nad obzorem ve stupních.
+func sunElevation(lat: Double, lon: Double, date: Date = Date()) -> Double {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "UTC")!
+    let c = cal.dateComponents([.year, .hour, .minute, .second], from: date)
+    let day = Double(cal.ordinality(of: .day, in: .year, for: date) ?? 1)
+    let hour = Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60 + Double(c.second ?? 0) / 3600
+    let g = 2 * Double.pi / 365 * (day - 1 + (hour - 12) / 24)
+    let eqTime = 229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g) - 0.014615 * cos(2 * g) - 0.040849 * sin(2 * g))
+    let decl = 0.006918 - 0.399912 * cos(g) + 0.070257 * sin(g) - 0.006758 * cos(2 * g) + 0.000907 * sin(2 * g)
+        - 0.002697 * cos(3 * g) + 0.00148 * sin(3 * g)
+    let tst = hour * 60 + eqTime + 4 * lon
+    let ha = (tst / 4 - 180) * Double.pi / 180
+    let latR = lat * Double.pi / 180
+    let cosZ = sin(latR) * sin(decl) + cos(latR) * cos(decl) * cos(ha)
+    return 90 - acos(max(-1, min(1, cosZ))) * 180 / Double.pi
+}
+
+/// Noc = slunce víc než 3° pod obzorem (po soumraku).
+func isNight(at c: CLLocationCoordinate2D?, date: Date = Date()) -> Bool {
+    guard let c = c else {
+        let h = Calendar.current.component(.hour, from: date)
+        return h < 6 || h >= 20
+    }
+    return sunElevation(lat: c.latitude, lon: c.longitude, date: date) < -3
+}
+
+// MARK: - Text pro přístrojovku
+/// Zkrátí dlouhé názvy ulic běžnými zkratkami (přístrojovka zalamuje po písmenech).
+func dashText(_ s: String) -> String {
+    var t = s
+    if let comma = t.range(of: ", ") { t = String(t[..<comma.lowerBound]) }   // „D 55, směr Olomouc…“ → „D 55“
+    let repl: [(String, String)] = [
+        ("třída ", "tř. "), ("Třída ", "Tř. "), ("náměstí", "nám."), ("Náměstí", "Nám."),
+        ("nábřeží", "nábř."), ("Nábřeží ", "Nábř. "), ("Silnice ", ""), ("ulice ", "ul. "),
+    ]
+    for (a, b) in repl { t = t.replacingOccurrences(of: a, with: b) }
+    return t.trimmingCharacters(in: .whitespaces)
+}
+
+enum DayNightMode: String, Codable, CaseIterable, Identifiable {
+    case auto, day, night
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: return T("Automatic")
+        case .day: return T("Day")
+        case .night: return T("Night")
+        }
+    }
 }

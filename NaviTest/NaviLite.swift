@@ -180,6 +180,16 @@ enum NL {
         return .init(svc: 98, pdt: pdtPointer, payload: w.b)
     }
 
+    // MARK: Čerpací stanice (obsah typu 4) – stejný formát jako oblíbená místa, jiné služby
+    static func gasPoiUpdate(count: Int) -> NLMessage {
+        let f = favPoiUpdate(count: count)
+        return .init(svc: 8, pdt: f.pdt, payload: f.payload)
+    }
+    static func gasPoiData(list: Int, item: Int, direction: UInt8, dist: Float, unit: String, name: String) -> NLMessage {
+        let f = favPoiData(list: list, item: item, direction: direction, dist: dist, unit: unit, name: name)
+        return .init(svc: 99, pdt: f.pdt, payload: f.payload)
+    }
+
     // MARK: Obraz (obsah typu 1)
     /// imageType 3 = rozšířený navigační pohled, sekvence u16 LE, pak baseline JPEG 480×240.
     static func image(seq: Int, jpeg: [UInt8], imageType: UInt8 = 3) -> NLMessage {
@@ -249,8 +259,13 @@ enum NL {
         case 80: return "IMAGE_ACK"
         case 82: return "AUTH_ACK"
         case 83: return "SEC_DATA"
+        case 7: return "FAV_POI_LIST"
+        case 8: return "GAS_POI_LIST"
+        case 15: return "ROUTE_CALC"
+        case 18: return "VIA_COUNT"
         case 97: return "TBT_DATA"
         case 98: return "FAV_POI_DATA"
+        case 99: return "GAS_POI_DATA"
         default: return "svc\(svc)"
         }
     }
@@ -292,6 +307,9 @@ enum NL {
             ("ŠKOLA zrušit (9)", schoolZoneClear(), "047e0000"),
             ("RYCHLOST (9)", speedingEvent(), "017e0100"),
             ("OBLÍBENÉ počet (7)", favPoiUpdate(count: 3), "030000"),
+            ("ČERPACÍ počet (8)", gasPoiUpdate(count: 3), "030000"),
+            ("ČERPACÍ položka (99)", gasPoiData(list: 1, item: 2, direction: 3, dist: 2.5, unit: "km", name: "Shell"),
+             "02000100030502000020406b6d5368656c6c"),
             ("VÝPOČET TRASY 0 % (15)", routeCalcProgress(0), "0000"),
             ("VÝPOČET TRASY 100 % (15)", routeCalcProgress(100), "6400"),
             ("VÝPOČET TRASY hotovo (15)", routeCalcProgress(-1), "ff00"),

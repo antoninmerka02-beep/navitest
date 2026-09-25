@@ -66,23 +66,35 @@ final class NavRoute {
             var rbExit = 0
             var rbAround = 180.0
             if TurnIcon.isRoundabout(icon) {
-                // Směr výjezdu: příjezd (posledních 30 m) vs. odjezd (80–130 m za vjezdem)
-                let inB = NavRoute.bearing(NavRoute.pointAt(points: pts, cum: c, d: at - 30),
-                                           NavRoute.pointAt(points: pts, cum: c, d: at))
-                let outB = NavRoute.bearing(NavRoute.pointAt(points: pts, cum: c, d: at + 80),
-                                            NavRoute.pointAt(points: pts, cum: c, d: at + 130))
-                var d = outB - inB
-                while d > 180 { d -= 360 }
-                while d < -180 { d += 360 }
-                var around = 180 - d
-                if around <= 0 { around += 360 }
-                if around > 360 { around -= 360 }
+                // Směr výjezdu: 1) z textu pokynu, 2) z tvaru trasy – tětiva od vjezdu k bodu ~200 m dál
+                // (to už jsi na výjezdové silnici, ne na kruhu)
+                let tl = text.lowercased()
+                var around: Double
+                if tl.contains("doleva") || tl.contains("vlevo") || tl.contains(" left") {
+                    around = 270
+                } else if tl.contains("doprava") || tl.contains("vpravo") || tl.contains(" right") {
+                    around = 90
+                } else if tl.contains("rovně") || tl.contains("pokračujte") || tl.contains("straight") || tl.contains("continue") {
+                    around = 180
+                } else {
+                    let inB = NavRoute.bearing(NavRoute.pointAt(points: pts, cum: c, d: at - 40),
+                                               NavRoute.pointAt(points: pts, cum: c, d: at))
+                    let outB = NavRoute.bearing(NavRoute.pointAt(points: pts, cum: c, d: at),
+                                                NavRoute.pointAt(points: pts, cum: c, d: at + 200))
+                    var d = outB - inB
+                    while d > 180 { d -= 360 }
+                    while d < -180 { d += 360 }
+                    around = 180 - d
+                    if around <= 0 { around += 360 }
+                    if around > 360 { around -= 360 }
+                }
                 rbAround = around
                 icon = TurnIcon.roundabout(around: around)
                 rbExit = NavRoute.exitNumber(text)
             }
-            man.append(RouteManeuver(at: at, icon: icon, road: NavRoute.roadName(text), text: text,
-                                     coordinate: pts[idx].coordinate, street: NavRoute.streetName(text),
+            let arrival = TurnIcon.isArrival(icon)
+            man.append(RouteManeuver(at: at, icon: icon, road: arrival ? destinationName : NavRoute.roadName(text), text: text,
+                                     coordinate: pts[idx].coordinate, street: arrival ? "" : NavRoute.streetName(text),
                                      rbExit: rbExit, rbAround: rbAround))
         }
         if man.last.map({ $0.icon > 2 }) ?? true {
@@ -243,6 +255,7 @@ final class Navigator {
     private var matchDist: Double = .infinity
     private var offCount = 0
     private var lastLocation: CLLocation?
+    private var fixTime = Date.distantPast
     private var heading: Double = 0
     private var arrivedAt: Date?
     private var lastReroute = Date.distantPast
@@ -271,6 +284,7 @@ final class Navigator {
     func update(_ loc: CLLocation) {
         lock.lock(); defer { lock.unlock() }
         lastLocation = loc
+        fixTime = Date()
         if loc.speed > 2, loc.course >= 0 { heading = loc.course }
         guard let r = route else { return }
         var m = match(loc, full: false)
@@ -325,30 +339,46 @@ final class Navigator {
         }
     }
 
+    /// Posun bodu o `dist` metrů ve směru `heading` (pro dopočet polohy mezi údaji z GPS).
+    private func moved(_ c: CLLocationCoordinate2D, heading: Double, dist: Double) -> CLLocationCoordinate2D {
+        let mpm = MKMetersPerMapPointAtLatitude(c.latitude)
+        let h = heading * .pi / 180
+        var p = MKMapPoint(c)
+        p.x += sin(h) * dist / mpm
+        p.y -= cos(h) * dist / mpm
+        return p.coordinate
+    }
+
+    /// Snímek navigace. Poloha se mezi údaji z GPS (~1× za s) dopočítává podle rychlosti,
+    /// takže mapa v motorce se pohybuje plynule při jakémkoli počtu snímků.
     func snapshot() -> NavSnapshot? {
         lock.lock(); defer { lock.unlock() }
+        let dt = min(2.0, max(0, Date().timeIntervalSince(fixTime)))
+        let spd = max(0, lastLocation?.speed ?? 0)
         guard let r = route else {
             // Volná jízda: jen poloha a směr, žádné pokyny
             guard let loc = lastLocation else { return nil }
             var s = NavSnapshot()
             s.guiding = false
-            s.position = loc.coordinate
+            s.position = spd > 1.5 ? moved(loc.coordinate, heading: heading, dist: spd * dt) : loc.coordinate
             s.heading = heading
             return s
         }
+        let onRoute = matchDist < 40
+        let a = (onRoute && spd > 1.0 && arrivedAt == nil) ? min(r.total, along + spd * dt) : along
         var s = NavSnapshot()
-        let idx = r.maneuvers.firstIndex { $0.at > along + 3 } ?? (r.maneuvers.count - 1)
+        let idx = r.maneuvers.firstIndex { $0.at > a + 3 } ?? (r.maneuvers.count - 1)
         let m = r.maneuvers[idx]
         s.icon = m.icon
-        s.toNext = max(0, m.at - along)
+        s.toNext = max(0, m.at - a)
         s.road = m.road
         s.text = m.text
-        s.remaining = max(0, r.total - along)
+        s.remaining = max(0, r.total - a)
         let secs = r.total > 0 ? r.expectedTime * s.remaining / r.total : 0
         s.minutesLeft = Int((secs / 60).rounded(.up))
         (s.etaHour, s.etaMinute) = etaComponents(secondsFromNow: secs)
         s.currentRoad = idx > 0 ? r.maneuvers[idx - 1].road : ""
-        s.upcoming = r.maneuvers[idx...].prefix(5).map { UpcomingItem(icon: $0.icon, dist: max(0, $0.at - along), text: $0.text) }
+        s.upcoming = r.maneuvers[idx...].prefix(5).map { UpcomingItem(icon: $0.icon, dist: max(0, $0.at - a), text: $0.text) }
         s.maneuverIndex = idx
         s.rbExit = m.rbExit
         s.rbAround = m.rbAround
@@ -359,12 +389,13 @@ final class Navigator {
             s.nextGap = nx.at - m.at
         }
         if let loc = lastLocation {
-            s.position = matchDist < 40 ? r.point(at: along).coordinate : loc.coordinate
+            s.position = onRoute ? r.point(at: a).coordinate : loc.coordinate
         }
-        s.heading = heading
-        s.routeAhead = r.coords(from: along, to: r.total)   // celá zbývající trasa
-        s.routeBehind = r.coords(from: along - 400, to: along)
+        s.heading = (onRoute && spd > 1.0) ? r.bearing(at: a) : heading
+        s.routeAhead = r.coords(from: a, to: r.total)   // celá zbývající trasa
+        s.routeBehind = r.coords(from: a - 400, to: a)
         s.maneuverPoint = m.coordinate
+        s.destination = r.points.last?.coordinate
         if arrivedAt != nil {
             s.arrived = true
             s.icon = r.maneuvers.last?.icon ?? TurnIcon.arriving

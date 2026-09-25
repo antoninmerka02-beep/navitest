@@ -148,6 +148,12 @@ final class FrameRenderer {
         ctx.restoreGState()
         }
 
+        // Cílová vlajka (šachovnice) – malá, ať nepřekáží
+        if nav.guiding, let dest = nav.destination, let q = toScreen(local(dest)),
+           q.x > -20, q.x < W + 20, q.y > -20, q.y < H + 30 {
+            drawFinishFlag(ctx, at: q)
+        }
+
         // Popisky: nejdřív ulice podél silnic, pak obce (svisle); nepřekrývají se
         var taken: [CGRect] = [
             CGRect(x: 0, y: H - 72, width: 180, height: 72),                  // box se šipkou
@@ -253,6 +259,33 @@ final class FrameRenderer {
             ctx.restoreGState()
             drawn += 1
         }
+    }
+
+    /// Šachovnicová vlajka: tyčka zapíchnutá v cíli, praporek 15×10 px.
+    private func drawFinishFlag(_ ctx: CGContext, at p: CGPoint) {
+        ctx.saveGState()
+        let poleTop = CGPoint(x: p.x, y: p.y + 24)
+        // tyčka s tmavým obrysem
+        ctx.setLineCap(.round)
+        ctx.setStrokeColor(CGColor(red: 0, green: 0, blue: 0, alpha: 0.8)); ctx.setLineWidth(4)
+        ctx.move(to: p); ctx.addLine(to: poleTop); ctx.strokePath()
+        ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1)); ctx.setLineWidth(2)
+        ctx.move(to: p); ctx.addLine(to: poleTop); ctx.strokePath()
+        // praporek 3×2 políčka
+        let cell: CGFloat = 5
+        let origin = CGPoint(x: p.x + 1, y: poleTop.y - 2 * cell)
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: origin.x - 1, y: origin.y - 1, width: 3 * cell + 2, height: 2 * cell + 2))
+        for i in 0..<3 {
+            for j in 0..<2 where (i + j) % 2 == 0 {
+                ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+                ctx.fill(CGRect(x: origin.x + CGFloat(i) * cell, y: origin.y + CGFloat(j) * cell, width: cell, height: cell))
+            }
+        }
+        // tečka v místě cíle
+        ctx.setFillColor(CGColor(red: 0.85, green: 1.0, blue: 0.0, alpha: 1))
+        ctx.fillEllipse(in: CGRect(x: p.x - 3, y: p.y - 3, width: 6, height: 6))
+        ctx.restoreGState()
     }
 
     /// Vynechá body blíž než ~2 px (celá trasa může mít tisíce bodů).

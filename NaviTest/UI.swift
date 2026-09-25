@@ -2,10 +2,15 @@ import SwiftUI
 import MapKit
 
 // MARK: - Mapa v telefonu (Apple mapa – telefon se na ni díváš jen odemčený)
+/// Špendlík výsledku hledání.
+final class PlacePin: MKPointAnnotation {
+    var place: Place?
+}
+
 struct PhoneMapView: UIViewRepresentable {
     @ObservedObject var model: AppModel
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
     func makeUIView(context: Context) -> MKMapView {
         let v = MKMapView()
@@ -13,6 +18,11 @@ struct PhoneMapView: UIViewRepresentable {
         v.showsUserLocation = true
         v.userTrackingMode = .follow
         v.showsCompass = true
+        v.selectableMapFeatures = [.pointsOfInterest]      // klepnutí na obchod, benzínku…
+        let lp = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.longPress(_:)))
+        lp.minimumPressDuration = 0.5
+        v.addGestureRecognizer(lp)
+        context.coordinator.mapView = v
         return v
     }
 
@@ -36,11 +46,31 @@ struct PhoneMapView: UIViewRepresentable {
                 c.destPin = a
             }
         }
+        // Špendlíky výsledků hledání
+        let ids = model.searchResults.map { $0.id }
+        if c.resultIds != ids {
+            c.resultIds = ids
+            v.removeAnnotations(c.resultPins)
+            c.resultPins = model.searchResults.map { p in
+                let a = PlacePin()
+                a.coordinate = p.coordinate
+                a.title = p.name
+                a.subtitle = model.distanceText(to: p)
+                a.place = p
+                return a
+            }
+            v.addAnnotations(c.resultPins)
+            if !c.resultPins.isEmpty {
+                var anns: [MKAnnotation] = c.resultPins
+                if v.userLocation.location != nil { anns.append(v.userLocation) }
+                v.showAnnotations(anns, animated: true)
+            }
+        }
         let selId = model.selectedPlace?.id
         if c.selectedId != selId {
             c.selectedId = selId
             if let a = c.selPin { v.removeAnnotation(a); c.selPin = nil }
-            if let p = model.selectedPlace {
+            if let p = model.selectedPlace, !model.searchResults.contains(where: { $0.id == p.id }) {
                 let a = MKPointAnnotation()
                 a.coordinate = p.coordinate
                 a.title = p.name
@@ -56,11 +86,17 @@ struct PhoneMapView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
+        let model: AppModel
+        weak var mapView: MKMapView?
         var routeVersion = -1
         var recenter = 0
         var selectedId: UUID? = nil
         var destPin: MKPointAnnotation?
         var selPin: MKPointAnnotation?
+        var resultPins: [PlacePin] = []
+        var resultIds: [UUID] = []
+
+        init(model: AppModel) { self.model = model }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let l = overlay as? MKPolyline {
@@ -70,6 +106,24 @@ struct PhoneMapView: UIViewRepresentable {
                 return r
             }
             return MKOverlayRenderer(overlay: overlay)
+        }
+
+        func mapView(_ mapView: MKMapView, didSelect annotation: MKAnnotation) {
+            if let pin = annotation as? PlacePin, let p = pin.place {
+                model.selectedPlace = p
+            } else if let feature = annotation as? MKMapFeatureAnnotation {
+                MKMapItemRequest(mapFeatureAnnotation: feature).getMapItem { [weak self] item, _ in
+                    guard let self = self, let item = item else { return }
+                    DispatchQueue.main.async { self.model.selectMapItem(item) }
+                }
+                mapView.deselectAnnotation(annotation, animated: false)
+            }
+        }
+
+        @objc func longPress(_ g: UILongPressGestureRecognizer) {
+            guard g.state == .began, let v = mapView else { return }
+            let c = v.convert(g.location(in: v), toCoordinateFrom: v)
+            model.dropPin(at: c)
         }
     }
 }
@@ -90,6 +144,8 @@ struct MainView: View {
                     topBar
                     if focused {
                         suggestionsList
+                    } else if !m.searchResults.isEmpty && m.selectedPlace == nil {
+                        resultsList
                     } else if m.destination == nil && m.selectedPlace == nil {
                         favoritesRow
                     }
@@ -106,7 +162,7 @@ struct MainView: View {
                 .padding(.bottom, 10)
             }
             .toolbar(.hidden, for: .navigationBar)
-            .onReceive(tick) { _ in m.refreshGuidance() }
+            .onReceive(tick) { _ in m.refreshGuidance(); m.refreshNight() }
             .onChange(of: query) { q in m.completer.update(q, near: m.currentLocation) }
             .onChange(of: phase) { p in
                 switch p {
@@ -127,7 +183,9 @@ struct MainView: View {
                     .submitLabel(.search)
                     .autocorrectionDisabled()
                     .onSubmit {
-                        if let first = m.completer.suggestions(query: query, store: m.places).first { choose(first) }
+                        // Hledat bez výběru návrhu = všechny výsledky v okolí
+                        focused = false
+                        m.searchNearby(query)
                     }
                 if focused || !query.isEmpty {
                     Button { query = ""; focused = false } label: {
@@ -174,6 +232,39 @@ struct MainView: View {
                 }
             }
             .frame(maxHeight: 380)
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var resultsList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(TF("Results nearby: %ld", m.searchResults.count)).font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(T("Close")) { m.clearResults() }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(m.searchResults) { p in
+                        Button { m.selectedPlace = p } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "mappin.circle.fill").foregroundStyle(.red)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(p.name).foregroundStyle(.primary).lineLimit(1)
+                                    Text([p.subtitle, m.distanceText(to: p) ?? ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                Spacer()
+                            }
+                            .padding(.vertical, 8).padding(.horizontal, 12)
+                            .contentShape(Rectangle())
+                        }
+                        Divider().padding(.leading, 46)
+                    }
+                }
+            }
+            .frame(maxHeight: 260)
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
@@ -347,6 +438,7 @@ struct SettingsView: View {
             }
             Section {
                 NavigationLink { MapSettingsView() } label: { Label(T("Map on the bike"), systemImage: "map") }
+                NavigationLink { MapDataView() } label: { Label(T("Map data"), systemImage: "externaldrive") }
                 NavigationLink { NavSettingsView() } label: { Label(T("Navigation"), systemImage: "arrow.triangle.turn.up.right.diamond") }
                 NavigationLink { VoiceSettingsView() } label: { Label(T("Voice guidance"), systemImage: "speaker.wave.2") }
                 NavigationLink { AssistSettingsView() } label: { Label(T("Rider assistance"), systemImage: "exclamationmark.triangle") }
@@ -393,12 +485,18 @@ struct MapSettingsView: View {
                 Toggle(T("Street names"), isOn: $m.opts.streetNames)
                 Toggle(T("Turn arrow and distance in the image"), isOn: $m.opts.turnBox)
                 Toggle(T("North up (otherwise direction of travel)"), isOn: $m.opts.northUp)
-                Toggle(T("Dark map"), isOn: $m.opts.darkMap)
+                Picker(T("Day / night"), selection: $m.opts.dayNight) {
+                    ForEach(DayNightMode.allCases) { Text($0.label).tag($0) }
+                }
             } footer: {
                 Text(T("3D: the map is tilted so you see further ahead. Apple map works only with the phone unlocked and only in 2D; the OSM map works in your pocket too. If the dashboard shows the turn arrow in its left column, you can turn off the arrow in the image."))
             }
             Section(T("Image")) {
-                Stepper(TF("Frames per second: %ld", Int(m.opts.imageFps)), value: $m.opts.imageFps, in: 1...6, step: 1)
+                Stepper(TF("Frames per second: %ld", Int(m.opts.imageFps)), value: $m.opts.imageFps, in: 1...20, step: 1)
+                if m.opts.imageFps > 6 {
+                    Text(T("Higher frame rates may make the image transfer unstable."))
+                        .font(.caption).foregroundStyle(.red)
+                }
                 VStack(alignment: .leading) {
                     Text(TF("Image quality: %ld %%", Int(m.opts.jpegQuality * 100)))
                     Slider(value: $m.opts.jpegQuality, in: 0.2...0.9, step: 0.05)
@@ -406,6 +504,54 @@ struct MapSettingsView: View {
             }
         }
         .navigationTitle(T("Map on the bike"))
+    }
+}
+
+struct MapDataView: View {
+    @EnvironmentObject var m: AppModel
+    @State private var url = ""
+    @State private var usage = "…"
+    @State private var confirmClear = false
+
+    var body: some View {
+        Form {
+            Section {
+                TextField(T("Custom URL (empty = OpenFreeMap)"), text: $url)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                Button(T("Apply")) { m.opts.tileURL = url.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines) == m.opts.tileURL)
+            } header: {
+                Text(T("Map data source"))
+            } footer: {
+                Text(T("Vector tiles in the OpenMapTiles schema only: a {z}/{x}/{y} template or a TileJSON address."))
+            }
+            Section {
+                HStack { Text(T("Stored maps")); Spacer(); Text(usage).foregroundStyle(.secondary) }
+                Button(T("Delete stored maps"), role: .destructive) { confirmClear = true }
+            }
+        }
+        .navigationTitle(T("Map data"))
+        .onAppear {
+            url = m.opts.tileURL
+            refreshUsage()
+        }
+        .alert(T("Delete stored maps?"), isPresented: $confirmClear) {
+            Button(T("Delete"), role: .destructive) {
+                TileStore.shared.clearDisk()
+                refreshUsage()
+            }
+            Button(T("Cancel"), role: .cancel) {}
+        }
+    }
+
+    private func refreshUsage() {
+        DispatchQueue.global(qos: .utility).async {
+            let b = TileStore.shared.diskUsage()
+            let text = ByteCountFormatter.string(fromByteCount: b, countStyle: .file)
+            DispatchQueue.main.async { usage = text }
+        }
     }
 }
 
@@ -437,9 +583,39 @@ struct VoiceSettingsView: View {
                     Slider(value: $m.voiceSettings.volume, in: 0.2...1.0, step: 0.1)
                 }
                 .disabled(!m.voiceSettings.enabled)
+                Picker(T("Instruction frequency"), selection: $m.voiceSettings.frequency) {
+                    ForEach(VoiceFrequency.allCases) { Text($0.label).tag($0) }
+                }
+                .disabled(!m.voiceSettings.enabled)
                 Button(T("Play sample")) { m.voice.sample() }
+            }
+            Section(T("Voice")) {
+                Picker(T("Voice language"), selection: $m.voiceSettings.language) {
+                    ForEach(VoiceLanguage.allCases) { Text($0.label).tag($0) }
+                }
+                Picker(T("Voice"), selection: $m.voiceSettings.voiceId) {
+                    Text(T("Automatic (best available)")).tag("")
+                    ForEach(VoiceGuide.voices(for: m.voiceSettings.effectiveLanguage), id: \.identifier) { v in
+                        Text(VoiceGuide.describe(v)).tag(v.identifier)
+                    }
+                }
+                VStack(alignment: .leading) {
+                    Text(TF("Speech rate: %ld %%", Int((m.voiceSettings.rate * 100).rounded())))
+                    Slider(value: $m.voiceSettings.rate, in: 0.6...1.6, step: 0.05)
+                }
             } footer: {
-                Text(T("Instructions are spoken in the app language and play through your helmet intercom; music is lowered while speaking. Better voices can be downloaded in iPhone Settings → Accessibility → Spoken Content → Voices."))
+                Text(T("Better voices can be downloaded in iPhone Settings → Accessibility → Spoken Content → Voices."))
+            }
+            Section(T("Audio")) {
+                Picker(T("Output"), selection: $m.voiceSettings.output) {
+                    ForEach(AudioOutput.allCases) { Text($0.label).tag($0) }
+                }
+                Picker(T("Playback mode"), selection: $m.voiceSettings.mode) {
+                    ForEach(AudioMode.allCases) { Text($0.label).tag($0) }
+                }
+                .disabled(m.voiceSettings.output == .speaker)
+            } footer: {
+                Text(T("As media: better sound, music is only lowered. As phone call: for intercoms that play navigation only as a call; music pauses."))
             }
         }
         .navigationTitle(T("Voice guidance"))

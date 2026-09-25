@@ -1,10 +1,58 @@
 import Foundation
 import AVFoundation
 
+enum VoiceLanguage: String, Codable, CaseIterable, Identifiable {
+    case app, en, cs
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .app: return T("Same as app")
+        case .en: return "English"
+        case .cs: return "Čeština"
+        }
+    }
+}
+
+enum VoiceFrequency: String, Codable, CaseIterable, Identifiable {
+    case low, normal, high
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .low: return T("Minimal")
+        case .normal: return T("Normal")
+        case .high: return T("Detailed")
+        }
+    }
+}
+
+enum AudioOutput: String, Codable, CaseIterable, Identifiable {
+    case system, bluetooth, speaker
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .system: return T("Default")
+        case .bluetooth: return "Bluetooth"
+        case .speaker: return T("Phone speaker")
+        }
+    }
+}
+
+enum AudioMode: String, Codable, CaseIterable, Identifiable {
+    case media, call
+    var id: String { rawValue }
+    var label: String { self == .media ? T("As media") : T("As phone call") }
+}
+
 struct VoiceSettings: Codable {
     var enabled = true
     var streetNames = true
     var volume: Double = 1.0
+    var language: VoiceLanguage = .app
+    var voiceId: String = ""              // prázdné = automaticky nejlepší hlas
+    var rate: Double = 1.0                // násobek výchozí rychlosti řeči
+    var frequency: VoiceFrequency = .normal
+    var output: AudioOutput = .system
+    var mode: AudioMode = .media
 
     init() {}
     init(from decoder: Decoder) throws {
@@ -13,6 +61,21 @@ struct VoiceSettings: Codable {
         enabled = (try? c.decodeIfPresent(Bool.self, forKey: .enabled)) ?? d.enabled
         streetNames = (try? c.decodeIfPresent(Bool.self, forKey: .streetNames)) ?? d.streetNames
         volume = (try? c.decodeIfPresent(Double.self, forKey: .volume)) ?? d.volume
+        language = (try? c.decodeIfPresent(VoiceLanguage.self, forKey: .language)) ?? d.language
+        voiceId = (try? c.decodeIfPresent(String.self, forKey: .voiceId)) ?? d.voiceId
+        rate = (try? c.decodeIfPresent(Double.self, forKey: .rate)) ?? d.rate
+        frequency = (try? c.decodeIfPresent(VoiceFrequency.self, forKey: .frequency)) ?? d.frequency
+        output = (try? c.decodeIfPresent(AudioOutput.self, forKey: .output)) ?? d.output
+        mode = (try? c.decodeIfPresent(AudioMode.self, forKey: .mode)) ?? d.mode
+    }
+
+    /// Skutečný jazyk pokynů.
+    var effectiveLanguage: AppLanguage {
+        switch language {
+        case .app: return L10n.lang
+        case .en: return .en
+        case .cs: return .cs
+        }
     }
 }
 
@@ -22,23 +85,47 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
     private let synth = AVSpeechSynthesizer()
     var settings = VoiceSettings()
 
-    // Co už bylo u aktuálního manévru řečeno: 1 = z dálky, 2 = před odbočkou, 3 = teď
     private var maneuverKey = ""
-    private var stage = 0
+    private var spokenLevel = 0          // kolik upozornění u tohoto manévru už zaznělo (0 = žádné)
+    private var lastSpoke = Date.distantPast
     private var arrivedSpoken = false
     private var routeGen = -1
+    private var mentionedNextKey = ""     // manévr ohlášený přes „poté …“
+    private var releaseAttempt = 0
 
     override init() {
         super.init()
         synth.delegate = self
     }
 
+    /// Hlasy nainstalované v iPhonu pro daný jazyk (nejkvalitnější první).
+    static func voices(for lang: AppLanguage) -> [AVSpeechSynthesisVoice] {
+        let prefix = String(lang.speechCode.prefix(2))
+        return AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.hasPrefix(prefix) }
+            .sorted { a, b in
+                if a.quality.rawValue != b.quality.rawValue { return a.quality.rawValue > b.quality.rawValue }
+                return a.name < b.name
+            }
+    }
+
+    static func describe(_ v: AVSpeechSynthesisVoice) -> String {
+        let q: String
+        switch v.quality {
+        case .premium: q = T("premium")
+        case .enhanced: q = T("enhanced")
+        default: q = T("standard")
+        }
+        return "\(v.name) (\(v.language), \(q))"
+    }
+
     // MARK: Veřejné
     func reset() {
         maneuverKey = ""
-        stage = 0
+        spokenLevel = 0
         arrivedSpoken = false
         routeGen = -1
+        mentionedNextKey = ""
         synth.stopSpeaking(at: .immediate)
     }
 
@@ -47,9 +134,10 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
         guard generation != routeGen else { return }
         routeGen = generation
         maneuverKey = ""
-        stage = 0
+        spokenLevel = 0
         arrivedSpoken = false
-        if reroute { say(phrase(.recalculated)) }
+        mentionedNextKey = ""
+        if reroute { say(cs ? "Přepočítávám trasu." : "Recalculating.") }
     }
 
     func update(_ s: NavSnapshot, speed: Double) {
@@ -59,72 +147,126 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
             return
         }
         let key = "\(s.maneuverIndex)|\(s.icon)|\(s.road)"
-        if key != maneuverKey { maneuverKey = key; stage = 0 }
+        if key != maneuverKey { maneuverKey = key; spokenLevel = 0 }
 
-        let v = max(8.0, speed)                      // m/s, ve stoje počítáme jako ~30 km/h
-        let nowD = max(30.0, v * 4)
-        let nearD = max(150.0, v * 12)
+        // Hranice vzdáleností podle rychlosti (m/s; ve stoje počítáme ~30 km/h)
+        let v = max(8.0, speed)
+        let nowD = max(30.0, v * 3.5)
+        let nearD = min(400.0, max(70.0, v * 8))
+        let midD = min(900.0, max(200.0, v * 16))
         let farD = min(2000.0, max(400.0, v * 35))
+        // Úrovně podle četnosti (od nejvzdálenější); „nyní“ je vždy poslední
+        let tiers: [Double]
+        switch settings.frequency {
+        case .low: tiers = [nearD]
+        case .normal: tiers = [midD, nearD]
+        case .high: tiers = [farD, midD, nearD]
+        }
         let d = s.toNext
 
         if d <= nowD {
-            if stage < 3 { stage = 3; say(instruction(s, distance: nil)) }
-        } else if d <= nearD {
-            if stage < 2 { stage = 2; say(instruction(s, distance: d)) }
-        } else if d <= farD {
-            if stage < 1 && d > nearD * 1.4 { stage = 1; say(instruction(s, distance: d)) }
+            if spokenLevel <= tiers.count {
+                spokenLevel = tiers.count + 1
+                say(instruction(s, distance: nil))
+            }
+            return
         }
+        // Pokud byl tento manévr už ohlášen přes „poté …“ a je blízko, počkáme až na „nyní“
+        if !mentionedNextKey.isEmpty && key.hasPrefix(mentionedNextKey) && d < nearD * 1.5 { return }
+        // Nejbližší úroveň, do které jsme se dostali a která ještě nezazněla
+        var reached = 0
+        for (i, t) in tiers.enumerated() where d <= t { reached = i + 1 }
+        guard reached > spokenLevel else { return }
+        // Nehlásit těsně po předchozím pokynu (kromě „nyní“)
+        if Date().timeIntervalSince(lastSpoke) < 6 { return }
+        // Nehlásit „za 50 m“, když je to skoro „nyní“ – radši počkat
+        if d < nowD * 1.6 { return }
+        spokenLevel = reached
+        say(instruction(s, distance: d))
     }
 
     func sample() {
         var s = NavSnapshot()
         s.icon = TurnIcon.turnL
-        s.street = L10n.lang == .cs ? "Třída Tomáše Bati" : "Main Street"
+        s.street = cs ? "Třída Tomáše Bati" : "Main Street"
         s.road = s.street
         say(instruction(s, distance: 300))
     }
 
-    // MARK: Řeč
+    // MARK: Zvuk
+    private func configureSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            switch (settings.output, settings.mode) {
+            case (.speaker, _):
+                try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .duckOthers])
+                try session.setActive(true)
+                try session.overrideOutputAudioPort(.speaker)
+            case (_, .call):
+                // „Jako hovor“: Bluetooth HFP (intercomy), bez Bluetooth reproduktor
+                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .defaultToSpeaker, .duckOthers])
+                try session.setActive(true)
+            default:
+                // „Jako média“: A2DP do helmy, jinak reproduktor; hudba se jen ztiší
+                try session.setCategory(.playback, mode: .voicePrompt, options: [.duckOthers, .interruptSpokenAudioAndMixWithOthers])
+                try session.setActive(true)
+            }
+        } catch {
+            log("⚠️ Zvuk: \(error.localizedDescription)")
+        }
+    }
+
     private func say(_ text: String) {
         guard !text.isEmpty else { return }
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .voicePrompt, options: [.duckOthers, .interruptSpokenAudioAndMixWithOthers])
-        try? session.setActive(true)
+        configureSession()
         if synth.isSpeaking { synth.stopSpeaking(at: .word) }
         let u = AVSpeechUtterance(string: text)
-        u.voice = bestVoice(L10n.lang.speechCode)
+        u.voice = chosenVoice()
         u.volume = Float(min(1, max(0.1, settings.volume)))
-        u.rate = AVSpeechUtteranceDefaultSpeechRate
+        let r = AVSpeechUtteranceDefaultSpeechRate * Float(min(1.6, max(0.6, settings.rate)))
+        u.rate = min(AVSpeechUtteranceMaximumSpeechRate, max(AVSpeechUtteranceMinimumSpeechRate, r))
         synth.speak(u)
+        lastSpoke = Date()
+        releaseAttempt = 0
         log("🔊 \(text)")
     }
 
-    private func bestVoice(_ code: String) -> AVSpeechSynthesisVoice? {
-        let prefix = String(code.prefix(2))
-        let all = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix(prefix) }
-        let exact = all.filter { $0.language == code }
-        let pool = exact.isEmpty ? all : exact
-        return pool.max { $0.quality.rawValue < $1.quality.rawValue } ?? AVSpeechSynthesisVoice(language: code)
+    private func chosenVoice() -> AVSpeechSynthesisVoice? {
+        if !settings.voiceId.isEmpty, let v = AVSpeechSynthesisVoice(identifier: settings.voiceId),
+           v.language.hasPrefix(String(settings.effectiveLanguage.speechCode.prefix(2))) {
+            return v
+        }
+        return VoiceGuide.voices(for: settings.effectiveLanguage).first
+            ?? AVSpeechSynthesisVoice(language: settings.effectiveLanguage.speechCode)
+    }
+
+    /// Uvolní zvuk, aby se hudba vrátila na původní hlasitost. iOS to odmítne, dokud syntéza ještě
+    /// dobíhá – proto s malým zpožděním a opakovaně.
+    private func releaseAudio() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self = self, !self.synth.isSpeaking else { return }
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            } catch {
+                self.releaseAttempt += 1
+                if self.releaseAttempt <= 5 { self.releaseAudio() }
+                else { log("⚠️ Zvuk se nepodařilo uvolnit: \(error.localizedDescription)") }
+            }
+        }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        if !synthesizer.isSpeaking {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
+        releaseAudio()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        releaseAudio()
     }
 
     // MARK: Skládání vět
-    private var cs: Bool { L10n.lang == .cs }
+    private var cs: Bool { settings.effectiveLanguage == .cs }
 
-    private enum Fixed { case recalculated }
-
-    private func phrase(_ f: Fixed) -> String {
-        switch f {
-        case .recalculated: return cs ? "Přepočítávám trasu." : "Recalculating."
-        }
-    }
-
-    /// „Za 300 metrů odbočte vlevo na X“ / „Odbočte vlevo na X“ (distance nil = teď).
+    /// „Za 300 metrů odbočte vlevo na X.“ / „Nyní odbočte vlevo na X.“
     private func instruction(_ s: NavSnapshot, distance: Double?) -> String {
         let action = actionPhrase(s)
         var text: String
@@ -135,6 +277,7 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
         }
         if let n = s.nextIcon, s.nextGap < 150, !TurnIcon.isArrival(n) {
             text += (cs ? ", poté " : ", then ") + lowerFirst(shortAction(n))
+            mentionedNextKey = "\(s.maneuverIndex + 1)|\(n)|"
         }
         return text + "."
     }

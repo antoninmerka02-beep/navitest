@@ -123,14 +123,15 @@ final class VTile {
     let paths: [VBucket: CGPath]
     let labels: [VLabel]
     let roads: [VRoadLabel]
-    init(key: TileKey, extent: CGFloat, paths: [VBucket: CGPath], labels: [VLabel], roads: [VRoadLabel]) {
-        self.key = key; self.extent = extent; self.paths = paths; self.labels = labels; self.roads = roads
+    let fuel: [VLabel]          // čerpací stanice (vrstva poi, class=fuel)
+    init(key: TileKey, extent: CGFloat, paths: [VBucket: CGPath], labels: [VLabel], roads: [VRoadLabel], fuel: [VLabel]) {
+        self.key = key; self.extent = extent; self.paths = paths; self.labels = labels; self.roads = roads; self.fuel = fuel
     }
 }
 
 // MARK: - Dekodér Mapbox Vector Tile (schéma OpenMapTiles)
 enum MVTDecoder {
-    static let wantedLayers: Set<String> = ["water", "landcover", "landuse", "waterway", "transportation", "place", "transportation_name"]
+    static let wantedLayers: Set<String> = ["water", "landcover", "landuse", "waterway", "transportation", "place", "transportation_name", "poi"]
 
     enum Value { case s(String), n(Double) }
 
@@ -139,23 +140,25 @@ enum MVTDecoder {
         var paths: [VBucket: CGMutablePath] = [:]
         var labels: [VLabel] = []
         var roads: [VRoadLabel] = []
+        var fuel: [VLabel] = []
         var extent: CGFloat = 4096
         while !r.atEnd {
             let (f, w) = r.key()
             if f == 3 && w == 2 {
                 let rng = r.lengthDelimited()
-                decodeLayer(bytes, rng, &paths, &labels, &roads, &extent)
+                decodeLayer(bytes, rng, &paths, &labels, &roads, &fuel, &extent)
             } else {
                 r.skip(w)
             }
         }
         var frozen: [VBucket: CGPath] = [:]
         for (b, p) in paths where !p.isEmpty { frozen[b] = p.copy() }
-        return VTile(key: key, extent: extent, paths: frozen, labels: labels, roads: roads)
+        return VTile(key: key, extent: extent, paths: frozen, labels: labels, roads: roads, fuel: fuel)
     }
 
     private static func decodeLayer(_ b: [UInt8], _ rng: Range<Int>, _ paths: inout [VBucket: CGMutablePath],
-                                    _ labels: inout [VLabel], _ roads: inout [VRoadLabel], _ extentOut: inout CGFloat) {
+                                    _ labels: inout [VLabel], _ roads: inout [VRoadLabel], _ fuel: inout [VLabel],
+                                    _ extentOut: inout CGFloat) {
         var r = PBReader(b, rng.lowerBound, rng.upperBound)
         var name = ""
         var keys: [String] = []
@@ -227,6 +230,12 @@ enum MVTDecoder {
                 for line in collectLines(b, g) where line.count >= 2 {
                     roads.append(VRoadLabel(points: line, name: label, priority: prio))
                 }
+            case "poi":
+                guard type == 1, cls == "fuel" else { continue }
+                let label = str("name:cs") ?? str("name:latin") ?? str("name") ?? ""
+                var pts: [CGPoint] = []
+                appendGeometry(b, g, type: 1, path: nil, points: &pts)
+                if let p = pts.first { fuel.append(VLabel(point: p, name: label.isEmpty ? "⛽" : label, priority: 0)) }
             case "place":
                 guard type == 1 else { continue }
                 let prio: Int
@@ -372,7 +381,9 @@ final class TileStore {
     private var template = "https://tiles.openfreemap.org/planet/latest/{z}/{x}/{y}.pbf"
     private let queue = OperationQueue()
     private let session: URLSession
-    private let dir: URL
+    private let root: URL
+    private var dir: URL
+    private var sourceKey = "openfreemap"
     private let memLimit = 160
     private var nDownloaded = 0, nDisk = 0, nFailed = 0, nPrefetched = 0
     private var loggedErrors = 0
@@ -385,9 +396,16 @@ final class TileStore {
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         cfg.httpAdditionalHeaders = ["User-Agent": "NaviTest-R9/0.3 (iOS; hobby motorcycle navigation)"]
         session = URLSession(configuration: cfg)
-        dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("tiles", isDirectory: true)
+        dir = root.appendingPathComponent("openfreemap", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Starší verze ukládaly dlaždice přímo do tiles/ – přesunout do složky zdroje
+        if let old = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+            for f in old where f.pathExtension == "pbf" {
+                try? FileManager.default.moveItem(at: f, to: dir.appendingPathComponent(f.lastPathComponent))
+            }
+        }
         resolveTemplate()
     }
 
@@ -522,8 +540,79 @@ final class TileStore {
         if n <= 5 || n % 50 == 0 { log("⚠️ \(s)") }
     }
 
-    private func resolveTemplate() {
-        guard let url = URL(string: "https://tiles.openfreemap.org/planet") else { return }
+    /// Nastaví zdroj mapových dat. Prázdné = OpenFreeMap. Šablona s {z}/{x}/{y} se použije přímo,
+    /// jiná adresa se bere jako TileJSON. Data musí být vektorová ve schématu OpenMapTiles.
+    func configure(url raw: String) {
+        let u = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = u.isEmpty ? "openfreemap" : "custom_\(TileStore.hash(u))"
+        lock.lock()
+        let changed = key != sourceKey
+        sourceKey = key
+        dir = root.appendingPathComponent(key, isDirectory: true)
+        if changed { cache.removeAll(); order.removeAll(); failedAt.removeAll() }
+        lock.unlock()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if u.isEmpty {
+            if changed { resolveTemplate() }
+        } else if u.contains("{z}") && u.contains("{x}") && u.contains("{y}") {
+            lock.lock(); template = u; lock.unlock()
+            log("🗺️ Vlastní zdroj map: \(u)")
+        } else {
+            resolveTemplate(from: u)
+        }
+    }
+
+    private static func hash(_ s: String) -> String {
+        var h: UInt64 = 5381
+        for b in s.utf8 { h = (h &* 33) &+ UInt64(b) }
+        return String(h, radix: 16)
+    }
+
+    /// Velikost uložených map v bajtech.
+    func diskUsage() -> Int64 {
+        var total: Int64 = 0
+        if let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey]) {
+            for case let f as URL in e {
+                total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            }
+        }
+        return total
+    }
+
+    /// Smaže všechny uložené mapy.
+    func clearDisk() {
+        lock.lock(); cache.removeAll(); order.removeAll(); failedAt.removeAll(); lock.unlock()
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        log("🗑️ Uložené mapy smazány")
+    }
+
+    /// Čerpací stanice z mapových dat v okolí (jen z paměti / disku, bez internetu). Záloha pro Apple hledání.
+    func fuelStations(near c: CLLocationCoordinate2D, tilesAround: Int = 2) -> [(name: String, coordinate: CLLocationCoordinate2D)] {
+        let z = maxZoom
+        let n = 1 << z
+        let s = MKMapSize.world.width / Double(n)
+        let p = MKMapPoint(c)
+        let cx = Int(p.x / s), cy = Int(p.y / s)
+        var out: [(String, CLLocationCoordinate2D)] = []
+        for x in (cx - tilesAround)...(cx + tilesAround) {
+            for y in (cy - tilesAround)...(cy + tilesAround) where x >= 0 && y >= 0 && x < n && y < n {
+                let k = TileKey(z: z, x: x, y: y)
+                var t = tile(k)
+                if t == nil, let d = try? Data(contentsOf: file(k)) { t = MVTDecoder.decode([UInt8](d), key: k) }
+                guard let tile = t else { continue }
+                for f in tile.fuel {
+                    let mp = MKMapPoint(x: Double(x) * s + Double(f.point.x) / Double(tile.extent) * s,
+                                        y: Double(y) * s + Double(f.point.y) / Double(tile.extent) * s)
+                    out.append((f.name, mp.coordinate))
+                }
+            }
+        }
+        return out
+    }
+
+    private func resolveTemplate(from custom: String? = nil) {
+        guard let url = URL(string: custom ?? "https://tiles.openfreemap.org/planet") else { return }
         session.dataTask(with: url) { [weak self] d, _, _ in
             guard let self = self, let d = d,
                   let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
