@@ -589,7 +589,7 @@ struct VoiceSettingsView: View {
                 .disabled(!m.voiceSettings.enabled)
                 Button(T("Play sample")) { m.voice.sample() }
             }
-            Section(T("Voice")) {
+            Section {
                 Picker(T("Voice language"), selection: $m.voiceSettings.language) {
                     ForEach(VoiceLanguage.allCases) { Text($0.label).tag($0) }
                 }
@@ -603,10 +603,12 @@ struct VoiceSettingsView: View {
                     Text(TF("Speech rate: %ld %%", Int((m.voiceSettings.rate * 100).rounded())))
                     Slider(value: $m.voiceSettings.rate, in: 0.6...1.6, step: 0.05)
                 }
+            } header: {
+                Text(T("Voice"))
             } footer: {
                 Text(T("Better voices can be downloaded in iPhone Settings → Accessibility → Spoken Content → Voices."))
             }
-            Section(T("Audio")) {
+            Section {
                 Picker(T("Output"), selection: $m.voiceSettings.output) {
                     ForEach(AudioOutput.allCases) { Text($0.label).tag($0) }
                 }
@@ -614,6 +616,8 @@ struct VoiceSettingsView: View {
                     ForEach(AudioMode.allCases) { Text($0.label).tag($0) }
                 }
                 .disabled(m.voiceSettings.output == .speaker)
+            } header: {
+                Text(T("Audio"))
             } footer: {
                 Text(T("As media: better sound, music is only lowered. As phone call: for intercoms that play navigation only as a call; music pauses."))
             }
