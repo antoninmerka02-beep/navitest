@@ -21,53 +21,83 @@ final class NavRoute {
     let total: Double
     let expectedTime: TimeInterval
 
-    init(route: MKRoute, destinationName: String) {
-        self.destinationName = destinationName
+    /// Průjezdní body trasy (vzdálenost od začátku, souřadnice, název).
+    let vias: [(at: Double, coordinate: CLLocationCoordinate2D, name: String)]
+
+    convenience init(route: MKRoute, destinationName: String) {
+        self.init(routes: [route], names: [destinationName])
+    }
+
+    /// Trasa z více úseků (A → průjezdní body → cíl). `names` = název konce každého úseku.
+    init(routes: [MKRoute], names: [String]) {
+        self.destinationName = names.last ?? ""
+        struct StepRef { let leg: Int; let text: String; let start: Int }
         var pts: [MKMapPoint] = []
-        var stepStart: [Int] = []
-        for step in route.steps {
-            let n = step.polyline.pointCount
-            let p = step.polyline.points()
-            if n == 0 { stepStart.append(max(0, pts.count - 1)); continue }
-            if let last = pts.last, last.distance(to: p[0]) < 0.5 { stepStart.append(pts.count - 1) }
-            else { stepStart.append(pts.count) }
-            for k in 0..<n {
-                let mp = p[k]
-                if let last = pts.last, last.distance(to: mp) < 0.5 { continue }
-                pts.append(mp)
+        var refs: [StepRef] = []
+        var legEnd: [Int] = []
+        for (li, route) in routes.enumerated() {
+            for step in route.steps {
+                let n = step.polyline.pointCount
+                let p = step.polyline.points()
+                var start = max(0, pts.count - 1)
+                if n > 0 {
+                    if let last = pts.last, last.distance(to: p[0]) < 0.5 { start = pts.count - 1 } else { start = pts.count }
+                    for k in 0..<n {
+                        let mp = p[k]
+                        if let last = pts.last, last.distance(to: mp) < 0.5 { continue }
+                        pts.append(mp)
+                    }
+                }
+                refs.append(StepRef(leg: li, text: step.instructions.trimmingCharacters(in: .whitespacesAndNewlines),
+                                    start: min(start, max(0, pts.count - 1))))
             }
+            legEnd.append(max(0, pts.count - 1))
         }
         if pts.count < 2 {
             pts = []
-            let n = route.polyline.pointCount, p = route.polyline.points()
-            for k in 0..<n { pts.append(p[k]) }
-            stepStart = route.steps.map { _ in 0 }
+            for route in routes {
+                let n = route.polyline.pointCount, p = route.polyline.points()
+                for k in 0..<n { pts.append(p[k]) }
+            }
+            refs = refs.map { StepRef(leg: $0.leg, text: $0.text, start: 0) }
+            legEnd = legEnd.map { _ in max(0, pts.count - 1) }
         }
         if pts.count < 2, let only = pts.first { pts.append(only) }
+        if pts.isEmpty { pts = [MKMapPoint(x: 0, y: 0), MKMapPoint(x: 0, y: 0)] }
         var c: [Double] = [0]
         for i in 1..<pts.count { c.append(c[i - 1] + pts[i - 1].distance(to: pts[i])) }
         points = pts
         cum = c
         total = c.last ?? 0
-        expectedTime = route.expectedTravelTime
+        expectedTime = routes.reduce(0) { $0 + $1.expectedTravelTime }
 
         var man: [RouteManeuver] = []
-        let steps = route.steps
-        for (i, step) in steps.enumerated() {
-            let text = step.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
-            if text.isEmpty { continue }
-            // MapKit: pokyn kroku platí na jeho KONCI (= začátek dalšího kroku), u posledního na konci trasy
-            let endIdx = i + 1 < stepStart.count ? stepStart[i + 1] : pts.count - 1
+        var viaList: [(at: Double, coordinate: CLLocationCoordinate2D, name: String)] = []
+        let lastLeg = routes.count - 1
+        for (i, ref) in refs.enumerated() {
+            let lastOfLeg = i + 1 >= refs.count || refs[i + 1].leg != ref.leg
+            let finalLeg = ref.leg == lastLeg
+            let legName = ref.leg < names.count ? names[ref.leg] : destinationName
+            if ref.text.isEmpty {
+                // úsek bez textu na konci → průjezdní bod doplníme sami
+                if lastOfLeg && !finalLeg {
+                    let idx = min(legEnd[ref.leg], pts.count - 1)
+                    man.append(RouteManeuver(at: c[idx], icon: 3, road: legName, text: legName, coordinate: pts[idx].coordinate))
+                    viaList.append((c[idx], pts[idx].coordinate, legName))
+                }
+                continue
+            }
+            let text = ref.text
+            // MapKit: pokyn kroku platí na jeho KONCI (= začátek dalšího kroku), u posledního na konci úseku
+            let endIdx = lastOfLeg ? legEnd[ref.leg] : refs[i + 1].start
             let idx = min(max(0, endIdx), pts.count - 1)
             let at = c[idx]
-            let isLast = i == steps.count - 1
             let delta = NavRoute.turnDelta(points: pts, cum: c, at: at)
-            var icon = NavRoute.classify(text, delta: delta, isLast: isLast)
+            var icon = NavRoute.classify(text, delta: delta, isLast: lastOfLeg)
             var rbExit = 0
             var rbAround = 180.0
             if TurnIcon.isRoundabout(icon) {
                 // Směr výjezdu: 1) z textu pokynu, 2) z tvaru trasy – tětiva od vjezdu k bodu ~200 m dál
-                // (to už jsi na výjezdové silnici, ne na kruhu)
                 let tl = text.lowercased()
                 var around: Double
                 if tl.contains("doleva") || tl.contains("vlevo") || tl.contains(" left") {
@@ -92,8 +122,13 @@ final class NavRoute {
                 icon = TurnIcon.roundabout(around: around)
                 rbExit = NavRoute.exitNumber(text)
             }
-            let arrival = TurnIcon.isArrival(icon)
-            man.append(RouteManeuver(at: at, icon: icon, road: arrival ? destinationName : NavRoute.roadName(text), text: text,
+            var arrival = TurnIcon.isArrival(icon)
+            if lastOfLeg && !finalLeg {
+                // konec úseku před dalším = průjezdní bod (Garmin ikony 3/4/5)
+                if !arrival { icon = 3; arrival = true } else if icon <= 2 { icon += 3 }
+                viaList.append((at, pts[idx].coordinate, legName))
+            }
+            man.append(RouteManeuver(at: at, icon: icon, road: arrival ? legName : NavRoute.roadName(text), text: text,
                                      coordinate: pts[idx].coordinate, street: arrival ? "" : NavRoute.streetName(text),
                                      rbExit: rbExit, rbAround: rbAround))
         }
@@ -101,6 +136,8 @@ final class NavRoute {
             man.append(RouteManeuver(at: total, icon: TurnIcon.arriving, road: destinationName, text: T("Destination"),
                                      coordinate: pts[pts.count - 1].coordinate))
         }
+        man.sort { $0.at < $1.at }
+        vias = viaList
         maneuvers = man
     }
 
@@ -266,6 +303,8 @@ final class Navigator {
 
     /// Volá se na hlavním vlákně, když je potřeba přepočítat trasu (sjetí z trasy).
     var onReroute: ((CLLocation) -> Void)?
+    /// Rychlostní limit v místě trasy (z asistence jezdce), 0 = neznámý.
+    var limitAt: ((Double) -> Int)?
 
     var hasRoute: Bool { lock.lock(); defer { lock.unlock() }; return route != nil }
     var location: CLLocation? { lock.lock(); defer { lock.unlock() }; return lastLocation }
@@ -325,6 +364,20 @@ final class Navigator {
             if d < best.dist { best = (i, r.cum[i] + a.distance(to: q), d) }
         }
         return best
+    }
+
+    /// Kolik průjezdních bodů už je za námi.
+    func passedVias() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        guard let r = route else { return 0 }
+        return r.vias.filter { $0.at <= along + 15 }.count
+    }
+
+    /// Kolik průjezdních bodů ještě zbývá (pro přístrojovku, zpráva 18).
+    func remainingVias() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        guard let r = route else { return 0 }
+        return r.vias.filter { $0.at > along + 15 }.count
     }
 
     /// Celý seznam odboček trasy pro přístrojovku (globální index = pořadí), vzdálenost = úsek od předchozí odbočky.
@@ -396,6 +449,9 @@ final class Navigator {
         s.routeBehind = r.coords(from: a - 400, to: a)
         s.maneuverPoint = m.coordinate
         s.destination = r.points.last?.coordinate
+        s.along = a
+        s.waypoints = r.vias.filter { $0.at > a + 10 }.map { $0.coordinate }
+        if let f = limitAt { s.speedLimit = Float(f(a)) }
         if arrivedAt != nil {
             s.arrived = true
             s.icon = r.maneuvers.last?.icon ?? TurnIcon.arriving

@@ -148,6 +148,13 @@ final class FrameRenderer {
         ctx.restoreGState()
         }
 
+        // Špendlíky průjezdních bodů
+        if nav.guiding {
+            for wp in nav.waypoints {
+                if let q = toScreen(local(wp)), q.x > -20, q.x < W + 20, q.y > -20, q.y < H + 30 { drawPin(ctx, at: q) }
+            }
+        }
+
         // Cílová vlajka (šachovnice) – malá, ať nepřekáží
         if nav.guiding, let dest = nav.destination, let q = toScreen(local(dest)),
            q.x > -20, q.x < W + 20, q.y > -20, q.y < H + 30 {
@@ -259,6 +266,23 @@ final class FrameRenderer {
             ctx.restoreGState()
             drawn += 1
         }
+    }
+
+    /// Mapový špendlík průjezdního bodu (hlavička 12 px, hrot v místě bodu).
+    private func drawPin(_ ctx: CGContext, at p: CGPoint) {
+        ctx.saveGState()
+        let head = CGPoint(x: p.x, y: p.y + 16)
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 0.8))
+        ctx.move(to: p)
+        ctx.addLine(to: CGPoint(x: head.x - 5, y: head.y - 3))
+        ctx.addLine(to: CGPoint(x: head.x + 5, y: head.y - 3))
+        ctx.closePath(); ctx.fillPath()
+        ctx.fillEllipse(in: CGRect(x: head.x - 7, y: head.y - 7, width: 14, height: 14))
+        ctx.setFillColor(CGColor(red: 1.0, green: 0.3, blue: 0.25, alpha: 1))
+        ctx.fillEllipse(in: CGRect(x: head.x - 5.5, y: head.y - 5.5, width: 11, height: 11))
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fillEllipse(in: CGRect(x: head.x - 2, y: head.y - 2, width: 4, height: 4))
+        ctx.restoreGState()
     }
 
     /// Šachovnicová vlajka: tyčka zapíchnutá v cíli, praporek 15×10 px.

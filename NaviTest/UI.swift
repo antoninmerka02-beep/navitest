@@ -132,6 +132,7 @@ struct PhoneMapView: UIViewRepresentable {
 struct MainView: View {
     @EnvironmentObject var m: AppModel
     @State private var query = ""
+    @State private var showPlanner = false
     @FocusState private var focused: Bool
     @Environment(\.scenePhase) private var phase
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -162,6 +163,9 @@ struct MainView: View {
                 .padding(.bottom, 10)
             }
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showPlanner) {
+                NavigationStack { RoutePlannerView() }.environmentObject(m)
+            }
             .onReceive(tick) { _ in m.refreshGuidance(); m.refreshNight() }
             .onChange(of: query) { q in m.completer.update(q, near: m.currentLocation) }
             .onChange(of: phase) { p in
@@ -321,6 +325,15 @@ struct MainView: View {
             } else if m.destination != nil {
                 GuidancePanel()
             }
+            if !m.planStops.isEmpty && m.destination == nil {
+                Button { showPlanner = true } label: {
+                    Label(TF("Route: %ld stops", m.planStops.count), systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(.regularMaterial, in: Capsule())
+                }
+                .foregroundStyle(.primary)
+            }
             HStack {
                 Label(m.bikeConnected ? T("Bike connected") : T("Bike not connected"),
                       systemImage: m.bikeConnected ? "checkmark.circle.fill" : "antenna.radiowaves.left.and.right.slash")
@@ -362,6 +375,10 @@ struct PlaceCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(m.calculating)
+                Button { m.addStop(place) } label: {
+                    Label(T("Add stop"), systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
                 Menu {
                     Button { m.setHome(place) } label: { Label(T("Set as Home"), systemImage: "house") }
                     Button { m.setWork(place) } label: { Label(T("Set as Work"), systemImage: "briefcase") }
@@ -443,6 +460,7 @@ struct SettingsView: View {
                 NavigationLink { VoiceSettingsView() } label: { Label(T("Voice guidance"), systemImage: "speaker.wave.2") }
                 NavigationLink { AssistSettingsView() } label: { Label(T("Rider assistance"), systemImage: "exclamationmark.triangle") }
                 NavigationLink { FavoritesSettingsView() } label: { Label(T("Favorite places"), systemImage: "star") }
+                NavigationLink { RoutePlannerView() } label: { Label(T("Routes"), systemImage: "point.topleft.down.curvedto.point.bottomright.up") }
             }
             Section {
                 NavigationLink { BikeView() } label: {
@@ -633,10 +651,28 @@ struct AssistSettingsView: View {
             Section {
                 Toggle(T("Speed cameras and section control"), isOn: $m.assist.cameras)
                 Toggle(T("School zones"), isOn: $m.assist.schools)
-                Toggle(T("Country borders"), isOn: $m.assist.borders)
                 Toggle(T("Speeding"), isOn: $m.assist.speeding)
+                Stepper(TF("Warn above the limit by: %ld km/h", m.assist.tolerance), value: $m.assist.tolerance, in: 0...30)
+                    .disabled(!m.assist.speeding)
             } footer: {
-                Text(T("Speed camera and speed limit data will be added in a later version. You can try the warnings below."))
+                Text(T("Data from OpenStreetMap, downloaded along the route when it is calculated. Coverage is good but not complete."))
+            }
+            Section {
+                soundRow(T("Speed camera"), $m.assist.cameraSound, .camera)
+                soundRow(T("Section control"), $m.assist.sectionSound, .section)
+                soundRow(T("School zone"), $m.assist.schoolSound, .school)
+                soundRow(T("Speeding"), $m.assist.speedingSound, .speeding)
+                VStack(alignment: .leading) {
+                    Text(TF("Alert volume: %ld %%", Int(m.assist.alertVolume * 100)))
+                    Slider(value: $m.assist.alertVolume, in: 0.2...1.0, step: 0.1)
+                }
+            } header: {
+                Text(T("Alert sounds"))
+            }
+            if !m.assistEngine.summary.isEmpty {
+                Section(T("On the current route")) {
+                    Text(TF("Cameras / sections / schools · speed limits known: %@", m.assistEngine.summary)).font(.caption)
+                }
             }
             Section(T("Try on the dashboard")) {
                 HStack {
@@ -656,6 +692,84 @@ struct AssistSettingsView: View {
             }
         }
         .navigationTitle(T("Rider assistance"))
+    }
+
+    private func soundRow(_ title: String, _ sel: Binding<AlertSound>, _ kind: AlertKind) -> some View {
+        HStack {
+            Picker(title, selection: sel) {
+                ForEach(AlertSound.allCases) { Text($0.label).tag($0) }
+            }
+            Button {
+                m.voice.playAlert(sel.wrappedValue, kind: kind, limit: 50, volume: m.assist.alertVolume)
+            } label: {
+                Image(systemName: "play.circle")
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+}
+
+// MARK: - Plánovač trasy a uložené trasy
+struct RoutePlannerView: View {
+    @EnvironmentObject var m: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var askName = false
+    @State private var name = ""
+
+    var body: some View {
+        List {
+            Section {
+                if m.planStops.isEmpty {
+                    Text(T("Search for a place and tap “Add stop”. The last stop is the destination.")).foregroundStyle(.secondary)
+                }
+                ForEach(Array(m.planStops.enumerated()), id: \.element.id) { i, p in
+                    HStack {
+                        Image(systemName: i == m.planStops.count - 1 ? "flag.checkered" : "mappin.circle.fill")
+                            .foregroundStyle(i == m.planStops.count - 1 ? Color.primary : Color.red)
+                        VStack(alignment: .leading) {
+                            Text(p.name)
+                            if !p.subtitle.isEmpty { Text(p.subtitle).font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                }
+                .onDelete { m.removeStops(at: $0) }
+                .onMove { m.moveStops(from: $0, to: $1) }
+            } header: {
+                Text(T("Stops"))
+            }
+            if !m.planStops.isEmpty {
+                Section {
+                    Button {
+                        m.navigatePlan()
+                        dismiss()
+                    } label: { Label(T("Navigate"), systemImage: "arrow.triangle.turn.up.right.diamond.fill") }
+                    Button { name = ""; askName = true } label: { Label(T("Save route"), systemImage: "square.and.arrow.down") }
+                    Button(role: .destructive) { m.clearPlan() } label: { Label(T("Clear stops"), systemImage: "trash") }
+                }
+            }
+            Section(T("Saved routes")) {
+                if m.places.routes.isEmpty { Text(T("None yet")).foregroundStyle(.secondary) }
+                ForEach(m.places.routes) { r in
+                    Button { m.loadRoute(r) } label: {
+                        VStack(alignment: .leading) {
+                            Text(r.name).foregroundStyle(.primary)
+                            Text(r.stops.map { $0.name }.joined(separator: " → ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                }
+                .onDelete { idx in
+                    let items = idx.map { m.places.routes[$0] }
+                    items.forEach { m.places.removeRoute($0) }
+                }
+            }
+        }
+        .navigationTitle(T("Routes"))
+        .toolbar { EditButton() }
+        .alert(T("Save route"), isPresented: $askName) {
+            TextField(T("Route name"), text: $name)
+            Button(T("Save")) { m.saveRoute(name: name) }
+            Button(T("Cancel"), role: .cancel) {}
+        }
     }
 }
 

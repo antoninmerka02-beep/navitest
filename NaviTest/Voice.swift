@@ -81,7 +81,7 @@ struct VoiceSettings: Codable {
 
 /// Hlasové pokyny přes vestavěný převod textu na řeč iPhonu (funguje na pozadí, jde do helmy přes intercom).
 /// Volá se z hlavního vlákna při každé nové poloze.
-final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
+final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
     private let synth = AVSpeechSynthesizer()
     var settings = VoiceSettings()
 
@@ -193,6 +193,39 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
         say(instruction(s, distance: 300))
     }
 
+    // MARK: Upozornění asistence (tón nebo hlas)
+    private var tonePlayer: AVAudioPlayer?
+
+    func playAlert(_ sound: AlertSound, kind: AlertKind, limit: Int, volume: Double) {
+        if sound == .voice {
+            say(alertText(kind, limit: limit), volume: volume)
+            return
+        }
+        guard let data = ToneGenerator.wav(sound) else { return }
+        configureSession()
+        do {
+            let p = try AVAudioPlayer(data: data)
+            p.volume = Float(min(1, max(0.1, volume)))
+            p.delegate = self
+            p.play()
+            tonePlayer = p
+            log("🔔 Tón: \(sound.rawValue)")
+        } catch {
+            log("⚠️ Tón: \(error.localizedDescription)")
+        }
+    }
+
+    private func alertText(_ k: AlertKind, limit: Int) -> String {
+        let l = limit > 0 ? ", \(limit)" : ""
+        switch k {
+        case .camera: return cs ? "Radar\(l)." : "Speed camera\(l)."
+        case .redLight: return cs ? "Kamera na červenou." : "Red light camera."
+        case .section: return cs ? "Úsekové měření\(l)." : "Average speed check\(l)."
+        case .school: return cs ? "Školní zóna." : "School zone."
+        case .speeding: return cs ? "Pozor, rychlost." : "Watch your speed."
+        }
+    }
+
     // MARK: Zvuk
     private func configureSession() {
         let session = AVAudioSession.sharedInstance()
@@ -216,13 +249,13 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    private func say(_ text: String) {
+    private func say(_ text: String, volume: Double? = nil) {
         guard !text.isEmpty else { return }
         configureSession()
         if synth.isSpeaking { synth.stopSpeaking(at: .word) }
         let u = AVSpeechUtterance(string: text)
         u.voice = chosenVoice()
-        u.volume = Float(min(1, max(0.1, settings.volume)))
+        u.volume = Float(min(1, max(0.1, volume ?? settings.volume)))
         let r = AVSpeechUtteranceDefaultSpeechRate * Float(min(1.6, max(0.6, settings.rate)))
         u.rate = min(AVSpeechUtteranceMaximumSpeechRate, max(AVSpeechUtteranceMinimumSpeechRate, r))
         synth.speak(u)
@@ -244,7 +277,7 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
     /// dobíhá – proto s malým zpožděním a opakovaně.
     private func releaseAudio() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self = self, !self.synth.isSpeaking else { return }
+            guard let self = self, !self.synth.isSpeaking, !(self.tonePlayer?.isPlaying ?? false) else { return }
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             } catch {
@@ -260,6 +293,10 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        releaseAudio()
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         releaseAudio()
     }
 
@@ -330,6 +367,10 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate {
             else if a < 330 { dir = cs ? "vlevo" : "left" }
             else { dir = cs ? "zpět" : "back" }
             return cs ? "Na kruhovém objezdu pokračujte \(dir)\(onto(s))" : "At the roundabout, go \(dir)\(onto(s))"
+        }
+        if i >= 3 && i <= 5 {
+            return cs ? "Dorazíte k průjezdnímu bodu\(s.road.isEmpty ? "" : " " + s.road)"
+                      : "You will reach your waypoint\(s.road.isEmpty ? "" : " " + s.road)"
         }
         if TurnIcon.isArrival(i) {
             switch i {

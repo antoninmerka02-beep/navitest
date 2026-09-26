@@ -489,6 +489,10 @@ final class TileStore {
         } else if let d = download(k) {
             bytes = [UInt8](d)
             try? d.write(to: url, options: .atomic)
+        } else if let d = try? Data(contentsOf: url) {
+            // bez internetu: raději starší uložená mapa než prázdné místo
+            bytes = [UInt8](d)
+            fromDisk = true
         }
         var t: VTile? = nil
         if decode, let b = bytes { t = MVTDecoder.decode(b, key: k) }

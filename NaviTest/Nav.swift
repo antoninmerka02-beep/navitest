@@ -17,7 +17,8 @@ enum TurnIcon {
     /// SF Symbol pro panel v telefonu.
     static func symbol(_ i: UInt8) -> String {
         switch i {
-        case 0...5: return "flag.checkered"
+        case 3...5: return "mappin.and.ellipse"
+        case 0...2: return "flag.checkered"
         case 6, 10: return "arrow.up.left"
         case 7, 11: return "arrow.up.right"
         case 14...31: return "arrow.triangle.turn.up.right.circle"
@@ -39,6 +40,7 @@ enum TurnIcon {
 
     static func name(_ i: UInt8) -> String {
         switch i {
+        case 3, 4, 5: return T("waypoint")
         case 0: return T("destination")
         case 1: return T("destination on the left")
         case 2: return T("destination on the right")
@@ -102,6 +104,8 @@ struct NavSnapshot {
     var routeBehind: [CLLocationCoordinate2D] = []
     var maneuverPoint: CLLocationCoordinate2D? = nil
     var destination: CLLocationCoordinate2D? = nil
+    var along: Double = 0                // metry od začátku trasy
+    var waypoints: [CLLocationCoordinate2D] = []   // zbývající průjezdní body (špendlíky)
 }
 
 /// Vzdálenost na hodnotu + jednotku jako StreetCross (m pod 1 km, jinak km).

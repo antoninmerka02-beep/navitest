@@ -116,6 +116,9 @@ final class DashSession {
     var onStatus: ((SessionStatus) -> Void)?
     /// Příkazy z joysticku / přístrojovky (49 stop trasy, 53 domů, …) – volá se na hlavním vlákně.
     var onBikeCommand: ((UInt8) -> Void)?
+    private var _bikeSpeed: Double = -1
+    /// Rychlost z motorky v km/h (-1 = neznámá).
+    var bikeSpeedKmh: Double { lock.lock(); defer { lock.unlock() }; return _bikeSpeed }
     /// Jezdec vybral cíl ze seznamu oblíbených na přístrojovce – volá se na hlavním vlákně.
     var onBikeNavigate: ((BikeFav) -> Void)?
 
@@ -153,6 +156,7 @@ final class DashSession {
     private var lastGuiding: Bool? = nil
     private var lastLoggedSource: MapSource? = nil
     private var lastRouteGen = -1
+    private var lastViaCount = -1
 
     /// metrů na pixel pro jednotlivé úrovně zoomu (0,25 = nejblíž, 160 = nejdál)
     private let mppTable: [Double] = [0.25, 0.4, 0.6, 0.9, 1.3, 2, 3, 4.5, 6.5, 10, 15, 22, 33, 50, 75, 110, 160]
@@ -352,6 +356,8 @@ final class DashSession {
                         tbtListStart = -1          // po startu trasy hned nový seznam odboček
                     }
                     updateTurnList(n, o)
+                    let vc = o.navSource == .real ? navigator.remainingVias() : 0
+                    if vc != lastViaCount { send(NL.viaCount(vc)); lastViaCount = vc }
                 } else if tbtListStart != -1 || tbtLastActive != -1 {
                     tbtListStart = -1
                     tbtLastActive = -1
@@ -437,8 +443,10 @@ final class DashSession {
         send(NL.routeCalcProgress(100))
         send(NL.routeCalcProgress(-1))
         send(NL.flag(2, true))
-        send(NL.viaCount(0))
-        log("➡️ Start trasy pro přístrojovku (výpočet 0→100 %, hotovo, naviguji, průjezdní body 0)")
+        let vc = navigator.remainingVias()
+        send(NL.viaCount(vc))
+        lastViaCount = vc
+        log("➡️ Start trasy pro přístrojovku (výpočet 0→100 %, hotovo, naviguji, průjezdní body \(vc))")
     }
 
     private func updateGuidingState(_ nav: NavSnapshot?) {
@@ -510,6 +518,10 @@ final class DashSession {
             let cb = onBikeCommand, svc = f.svc
             DispatchQueue.main.async { cb?(svc) }
         case 65:
+            if f.payload.count >= 3 {
+                let v = Double(Int(f.payload[1]) | Int(f.payload[2]) << 8)
+                lock.lock(); _bikeSpeed = v; lock.unlock()
+            }
             if Date().timeIntervalSince(lastSpeedLog) > 30 {
                 lastSpeedLog = Date()
                 log("⬅️ Rychlost z motorky: \(f.payload.hex)")

@@ -35,6 +35,14 @@ struct Place: Codable, Identifiable, Equatable {
     }
 }
 
+/// Uložená trasa: pojmenovaný seznam zastávek (poslední = cíl). Přepočítá se vždy od aktuální polohy.
+struct SavedRoute: Codable, Identifiable {
+    var id = UUID()
+    var name: String
+    var stops: [Place]
+    var date = Date()
+}
+
 /// Porovnávání bez ohledu na velikost písmen a diakritiku („tyr“ najde „Tyršova“).
 func fold(_ s: String) -> String {
     s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "cs_CZ"))
@@ -44,6 +52,8 @@ func fold(_ s: String) -> String {
 final class PlacesStore: ObservableObject {
     @Published private(set) var favorites: [Place] = []   // home, work, favorite
     @Published private(set) var history: [Place] = []     // nejnovější první
+    @Published private(set) var routes: [SavedRoute] = []
+    private let routesKey = "places.routes.v1"
 
     private let favKey = "places.favorites.v1"
     private let histKey = "places.history.v1"
@@ -52,6 +62,23 @@ final class PlacesStore: ObservableObject {
     init() {
         favorites = load(favKey)
         history = load(histKey)
+        if let d = UserDefaults.standard.data(forKey: routesKey),
+           let r = try? JSONDecoder().decode([SavedRoute].self, from: d) { routes = r }
+    }
+
+    func saveRoute(name: String, stops: [Place]) {
+        routes.removeAll { $0.name == name }
+        routes.insert(SavedRoute(name: name, stops: stops), at: 0)
+        saveRoutes()
+    }
+
+    func removeRoute(_ r: SavedRoute) {
+        routes.removeAll { $0.id == r.id }
+        saveRoutes()
+    }
+
+    private func saveRoutes() {
+        if let d = try? JSONEncoder().encode(routes) { UserDefaults.standard.set(d, forKey: routesKey) }
     }
 
     var home: Place? { favorites.first { $0.kind == .home } }
@@ -94,7 +121,7 @@ final class PlacesStore: ObservableObject {
     }
 
     func clearHistory() { history = []; save() }
-    func clearAll() { favorites = []; history = []; save() }
+    func clearAll() { favorites = []; history = []; routes = []; save(); saveRoutes() }
 
     private func load(_ key: String) -> [Place] {
         guard let d = UserDefaults.standard.data(forKey: key),
