@@ -147,7 +147,7 @@ struct MainView: View {
                         suggestionsList
                     } else if !m.searchResults.isEmpty && m.selectedPlace == nil {
                         resultsList
-                    } else if m.destination == nil && m.selectedPlace == nil {
+                    } else if m.destination == nil && m.selectedPlace == nil && !m.isPreviewing {
                         favoritesRow
                     }
                     Spacer()
@@ -199,6 +199,11 @@ struct MainView: View {
             }
             .padding(10)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            Button { showPlanner = true } label: {
+                Image(systemName: "point.topleft.down.curvedto.point.bottomright.up").font(.title3)
+                    .padding(10)
+                    .background(.regularMaterial, in: Circle())
+            }
             NavigationLink { SettingsView() } label: {
                 Image(systemName: "gearshape.fill").font(.title3)
                     .padding(10)
@@ -294,7 +299,7 @@ struct MainView: View {
             HStack(spacing: 8) {
                 favChip(T("Home"), "house.fill", m.places.home)
                 favChip(T("Work"), "briefcase.fill", m.places.work)
-                ForEach(m.places.others) { p in favChip(p.name, "star.fill", p) }
+                ForEach(m.places.others) { p in favChip(p.name, p.icon ?? "star.fill", p) }
             }
         }
     }
@@ -322,10 +327,12 @@ struct MainView: View {
         VStack(spacing: 8) {
             if let p = m.selectedPlace {
                 PlaceCard(place: p)
+            } else if m.isPreviewing {
+                PreviewPanel()
             } else if m.destination != nil {
                 GuidancePanel()
             }
-            if !m.planStops.isEmpty && m.destination == nil {
+            if !m.planStops.isEmpty && m.destination == nil && !m.isPreviewing {
                 Button { showPlanner = true } label: {
                     Label(TF("Route: %ld stops", m.planStops.count), systemImage: "point.topleft.down.curvedto.point.bottomright.up")
                         .font(.subheadline.weight(.semibold))
@@ -354,6 +361,7 @@ struct MainView: View {
 struct PlaceCard: View {
     @EnvironmentObject var m: AppModel
     let place: Place
+    @State private var editFavorite = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -368,23 +376,26 @@ struct PlaceCard: View {
                     Image(systemName: "xmark.circle.fill").font(.title2).foregroundStyle(.secondary)
                 }
             }
+            Button { m.preview(stops: [place]) } label: {
+                Label(m.calculating ? T("Calculating…") : T("Navigate"), systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(m.calculating)
             HStack(spacing: 10) {
-                Button { m.navigate(to: place) } label: {
-                    Label(m.calculating ? T("Calculating…") : T("Navigate"), systemImage: "arrow.triangle.turn.up.right.diamond.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(m.calculating)
                 Button { m.addStop(place) } label: {
-                    Label(T("Add stop"), systemImage: "plus")
+                    Label(T("Add stop"), systemImage: "plus").lineLimit(1).minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 Menu {
                     Button { m.setHome(place) } label: { Label(T("Set as Home"), systemImage: "house") }
                     Button { m.setWork(place) } label: { Label(T("Set as Work"), systemImage: "briefcase") }
-                    Button { m.addFavorite(place) } label: { Label(T("Add to favorites"), systemImage: "star") }
+                    Button { editFavorite = true } label: { Label(T("Add to favorites"), systemImage: "star") }
                 } label: {
-                    Label(T("Save"), systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
+                    Label(T("Save"), systemImage: "square.and.arrow.down").lineLimit(1).minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
                 }
                 .menuStyle(.button)
                 .buttonStyle(.bordered)
@@ -392,6 +403,80 @@ struct PlaceCard: View {
         }
         .padding(14)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .sheet(isPresented: $editFavorite) {
+            NavigationStack { FavoriteEditorView(place: place) }.environmentObject(m)
+        }
+    }
+}
+
+// MARK: - Náhled trasy (alternativy, Start)
+struct PreviewPanel: View {
+    @EnvironmentObject var m: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(m.previewName).font(.headline).lineLimit(1)
+                Spacer()
+                Button { m.cancelPreview() } label: {
+                    Image(systemName: "xmark.circle.fill").font(.title2).foregroundStyle(.secondary)
+                }
+            }
+            if m.previewRoutes.count > 1 {
+                Picker(T("Route"), selection: $m.previewIndex) {
+                    ForEach(m.previewRoutes.indices, id: \.self) { i in
+                        Text(m.routeText(m.previewRoutes[i])).tag(i)
+                    }
+                }
+                .pickerStyle(.segmented)
+            } else if let r = m.previewRoutes.first {
+                Text(m.routeText(r)).font(.subheadline).foregroundStyle(.secondary)
+            }
+            Button { m.startPreview() } label: {
+                Label(T("Start"), systemImage: "play.fill").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+// MARK: - Oblíbené místo: vlastní název a ikona
+struct FavoriteEditorView: View {
+    @EnvironmentObject var m: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let place: Place
+    @State private var name = ""
+    @State private var icon = "star.fill"
+    static let icons = ["star.fill", "house.fill", "briefcase.fill", "heart.fill", "cup.and.saucer.fill", "fork.knife",
+                        "fuelpump.fill", "wrench.and.screwdriver.fill", "person.2.fill", "mountain.2.fill", "flag.fill",
+                        "cart.fill", "bed.double.fill", "camera.fill", "leaf.fill", "building.2.fill"]
+
+    var body: some View {
+        Form {
+            Section(T("Name")) {
+                TextField(T("Name"), text: $name)
+            }
+            Section(T("Icon")) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 12) {
+                    ForEach(FavoriteEditorView.icons, id: \.self) { s in
+                        Image(systemName: s)
+                            .font(.title3)
+                            .frame(width: 40, height: 40)
+                            .background(icon == s ? Color.accentColor.opacity(0.25) : Color.clear, in: Circle())
+                            .onTapGesture { icon = s }
+                    }
+                }
+            }
+        }
+        .navigationTitle(T("Favorite place"))
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button(T("Cancel")) { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) {
+                Button(T("Save")) { m.saveFavorite(place, name: name, icon: icon); dismiss() }
+            }
+        }
+        .onAppear { name = place.name; icon = place.icon ?? "star.fill" }
     }
 }
 
@@ -413,8 +498,8 @@ struct GuidancePanel: View {
                     Spacer()
                 }
                 HStack {
-                    Text(TF("%.1f km · %ld min · arrival %02ld:%02ld",
-                            g.remaining / 1000, g.minutesLeft, g.etaHour, g.etaMinute))
+                    Text(TF("%@ · %@ · arrival %02ld:%02ld",
+                            formatDistanceText(g.remaining), formatDuration(minutes: g.minutesLeft), g.etaHour, g.etaMinute))
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button(role: .destructive) { m.endNavigation() } label: { Label(T("End"), systemImage: "xmark") }
@@ -580,6 +665,26 @@ struct NavSettingsView: View {
             Section {
                 Toggle(T("Avoid motorways"), isOn: $m.avoidHighways)
                 Toggle(T("Avoid tolls"), isOn: $m.avoidTolls)
+                Toggle(T("Offer alternative routes"), isOn: $m.navOpts.alternatives)
+            }
+            Section {
+                Toggle(T("Recalculate automatically"), isOn: $m.navOpts.autoReroute)
+                Picker(T("Off-route distance"), selection: $m.navOpts.offRoute) {
+                    Text("25 m").tag(25)
+                    Text("40 m").tag(40)
+                    Text("70 m").tag(70)
+                }
+                .disabled(!m.navOpts.autoReroute)
+            } footer: {
+                Text(T("How far from the route you must be before a new route is calculated."))
+            }
+            Section {
+                Toggle(T("Zoom out with speed on the bike map"), isOn: $m.opts.autoZoom)
+                Picker(T("Units"), selection: $m.navOpts.imperial) {
+                    Text(T("Kilometres")).tag(false)
+                    Text(T("Miles")).tag(true)
+                }
+                .pickerStyle(.segmented)
             } footer: {
                 Text(T("Motorcycle-friendly routes are planned for a later version."))
             }
@@ -654,14 +759,22 @@ struct AssistSettingsView: View {
                 Toggle(T("Speeding"), isOn: $m.assist.speeding)
                 Stepper(TF("Warn above the limit by: %ld km/h", m.assist.tolerance), value: $m.assist.tolerance, in: 0...30)
                     .disabled(!m.assist.speeding)
+                Picker(T("Speed for warnings"), selection: $m.assist.speedSource) {
+                    ForEach(SpeedSource.allCases) { Text($0.label).tag($0) }
+                }
+                .disabled(!m.assist.speeding)
+                if m.assist.speedSource == .speedometer {
+                    Stepper(TF("Speedometer shows more by: %ld %%", m.assist.speedoCorrection),
+                            value: $m.assist.speedoCorrection, in: 0...15)
+                }
             } footer: {
-                Text(T("Data from OpenStreetMap, downloaded along the route when it is calculated. Coverage is good but not complete."))
+                Text(T("Works during navigation and in free drive. Data from OpenStreetMap, stored on the phone for a week. Speedometers show 5–10 % more than the actual speed – with “Speedometer” the warning matches what you see on the dash."))
             }
             Section {
-                soundRow(T("Speed camera"), $m.assist.cameraSound, .camera)
-                soundRow(T("Section control"), $m.assist.sectionSound, .section)
-                soundRow(T("School zone"), $m.assist.schoolSound, .school)
-                soundRow(T("Speeding"), $m.assist.speedingSound, .speeding)
+                soundRows(T("Speed camera"), $m.assist.cameraSound, $m.assist.cameraVoice, .camera)
+                soundRows(T("Section control"), $m.assist.sectionSound, $m.assist.sectionVoice, .section)
+                soundRows(T("School zone"), $m.assist.schoolSound, $m.assist.schoolVoice, .school)
+                soundRows(T("Speeding"), $m.assist.speedingSound, $m.assist.speedingVoice, .speeding)
                 VStack(alignment: .leading) {
                     Text(TF("Alert volume: %ld %%", Int(m.assist.alertVolume * 100)))
                     Slider(value: $m.assist.alertVolume, in: 0.2...1.0, step: 0.1)
@@ -694,27 +807,29 @@ struct AssistSettingsView: View {
         .navigationTitle(T("Rider assistance"))
     }
 
-    private func soundRow(_ title: String, _ sel: Binding<AlertSound>, _ kind: AlertKind) -> some View {
+    @ViewBuilder
+    private func soundRows(_ title: String, _ sel: Binding<AlertSound>, _ voiceOn: Binding<Bool>, _ kind: AlertKind) -> some View {
         HStack {
             Picker(title, selection: sel) {
                 ForEach(AlertSound.allCases) { Text($0.label).tag($0) }
             }
-            Button {
-                m.voice.playAlert(sel.wrappedValue, kind: kind, limit: 50, volume: m.assist.alertVolume)
-            } label: {
-                Image(systemName: "play.circle")
-            }
-            .buttonStyle(.borderless)
+            Button { m.playAssistAlert(kind, limit: 50) } label: { Image(systemName: "play.circle") }
+                .buttonStyle(.borderless)
         }
+        Toggle(T("Announce by voice"), isOn: voiceOn).padding(.leading, 16).font(.subheadline)
     }
 }
 
 // MARK: - Plánovač trasy a uložené trasy
+struct StopRef: Identifiable { let id: Int }
+
 struct RoutePlannerView: View {
     @EnvironmentObject var m: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var askName = false
+    @State private var asNew = false
     @State private var name = ""
+    @State private var editStop: StopRef? = nil
 
     var body: some View {
         List {
@@ -723,19 +838,23 @@ struct RoutePlannerView: View {
                     Text(T("Search for a place and tap “Add stop”. The last stop is the destination.")).foregroundStyle(.secondary)
                 }
                 ForEach(Array(m.planStops.enumerated()), id: \.element.id) { i, p in
-                    HStack {
-                        Image(systemName: i == m.planStops.count - 1 ? "flag.checkered" : "mappin.circle.fill")
-                            .foregroundStyle(i == m.planStops.count - 1 ? Color.primary : Color.red)
-                        VStack(alignment: .leading) {
-                            Text(p.name)
-                            if !p.subtitle.isEmpty { Text(p.subtitle).font(.caption).foregroundStyle(.secondary) }
+                    Button { editStop = StopRef(id: i) } label: {
+                        HStack {
+                            Image(systemName: i == m.planStops.count - 1 ? "flag.checkered" : "mappin.circle.fill")
+                                .foregroundStyle(i == m.planStops.count - 1 ? Color.primary : Color.red)
+                            VStack(alignment: .leading) {
+                                Text(p.name).foregroundStyle(.primary)
+                                if !p.subtitle.isEmpty { Text(p.subtitle).font(.caption).foregroundStyle(.secondary) }
+                            }
+                            Spacer()
+                            Image(systemName: "pencil").foregroundStyle(.secondary)
                         }
                     }
                 }
                 .onDelete { m.removeStops(at: $0) }
                 .onMove { m.moveStops(from: $0, to: $1) }
             } header: {
-                Text(T("Stops"))
+                Text(m.editingRouteId == nil ? T("Stops") : TF("Editing: %@", m.editingRouteName))
             }
             if !m.planStops.isEmpty {
                 Section {
@@ -743,32 +862,176 @@ struct RoutePlannerView: View {
                         m.navigatePlan()
                         dismiss()
                     } label: { Label(T("Navigate"), systemImage: "arrow.triangle.turn.up.right.diamond.fill") }
-                    Button { name = ""; askName = true } label: { Label(T("Save route"), systemImage: "square.and.arrow.down") }
+                    Button { name = m.editingRouteName; asNew = false; askName = true } label: {
+                        Label(m.editingRouteId == nil ? T("Save route") : T("Save changes"), systemImage: "square.and.arrow.down")
+                    }
+                    if m.editingRouteId != nil {
+                        Button { name = ""; asNew = true; askName = true } label: {
+                            Label(T("Save as new route"), systemImage: "plus.square.on.square")
+                        }
+                    }
                     Button(role: .destructive) { m.clearPlan() } label: { Label(T("Clear stops"), systemImage: "trash") }
                 }
             }
-            Section(T("Saved routes")) {
+            Section {
                 if m.places.routes.isEmpty { Text(T("None yet")).foregroundStyle(.secondary) }
                 ForEach(m.places.routes) { r in
-                    Button { m.loadRoute(r) } label: {
-                        VStack(alignment: .leading) {
-                            Text(r.name).foregroundStyle(.primary)
-                            Text(r.stops.map { $0.name }.joined(separator: " → ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    HStack {
+                        Button { m.loadRoute(r) } label: {
+                            VStack(alignment: .leading) {
+                                Text(r.name).foregroundStyle(.primary)
+                                Text(r.stops.map { $0.name }.joined(separator: " → ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            }
                         }
+                        Spacer()
+                        Button {
+                            m.preview(stops: r.stops)
+                            dismiss()
+                        } label: {
+                            Image(systemName: "arrow.triangle.turn.up.right.circle.fill").font(.title2)
+                        }
+                        .buttonStyle(.borderless)
                     }
                 }
                 .onDelete { idx in
                     let items = idx.map { m.places.routes[$0] }
                     items.forEach { m.places.removeRoute($0) }
                 }
+            } header: {
+                Text(T("Saved routes"))
+            } footer: {
+                Text(T("Tap a route to edit it, tap the arrow to navigate."))
             }
         }
         .navigationTitle(T("Routes"))
-        .toolbar { EditButton() }
-        .alert(T("Save route"), isPresented: $askName) {
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button(T("Close")) { dismiss() } }
+            ToolbarItem(placement: .primaryAction) { EditButton() }
+        }
+        .alert(asNew || m.editingRouteId == nil ? T("Save route") : T("Save changes"), isPresented: $askName) {
             TextField(T("Route name"), text: $name)
-            Button(T("Save")) { m.saveRoute(name: name) }
+            Button(T("Save")) { m.saveRoute(name: name, asNew: asNew) }
             Button(T("Cancel"), role: .cancel) {}
+        }
+        .sheet(item: $editStop) { ref in
+            NavigationStack { StopEditView(index: ref.id) }.environmentObject(m)
+        }
+    }
+}
+
+/// Úprava zastávky: nové hledání, posunutí špendlíku na mapě, smazání.
+struct StopEditView: View {
+    @EnvironmentObject var m: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let index: Int
+    @State private var query = ""
+
+    var body: some View {
+        List {
+            Section {
+                TextField(T("Search for a new place"), text: $query)
+                    .autocorrectionDisabled()
+                ForEach(m.completer.suggestions(query: query, store: m.places).prefix(8)) { s in
+                    Button { choose(s) } label: {
+                        VStack(alignment: .leading) {
+                            Text(s.title).foregroundStyle(.primary)
+                            if !s.subtitle.isEmpty { Text(s.subtitle).font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                }
+            }
+            Section {
+                NavigationLink {
+                    PinPickerView(start: index < m.planStops.count ? m.planStops[index].coordinate : m.currentLocation?.coordinate) { p in
+                        m.replaceStop(at: index, with: p)
+                        dismiss()
+                    }
+                } label: { Label(T("Move the pin on the map"), systemImage: "mappin.and.ellipse") }
+                Button(role: .destructive) {
+                    if index < m.planStops.count { m.removeStops(at: IndexSet(integer: index)) }
+                    dismiss()
+                } label: { Label(T("Delete stop"), systemImage: "trash") }
+            }
+        }
+        .navigationTitle(index < m.planStops.count ? m.planStops[index].name : T("Stop"))
+        .toolbar { ToolbarItem(placement: .cancellationAction) { Button(T("Close")) { dismiss() } } }
+        .onChange(of: query) { q in m.completer.update(q, near: m.currentLocation) }
+    }
+
+    private func choose(_ s: Suggestion) {
+        if let p = s.place { m.replaceStop(at: index, with: p); dismiss(); return }
+        guard let c = s.completion else { return }
+        MKLocalSearch(request: MKLocalSearch.Request(completion: c)).start { resp, _ in
+            guard let item = resp?.mapItems.first else { return }
+            var p = Place.from(item)
+            p.name = s.title
+            if !s.subtitle.isEmpty { p.subtitle = s.subtitle }
+            m.replaceStop(at: index, with: p)
+            dismiss()
+        }
+    }
+}
+
+/// Výběr místa posunutím mapy pod pevným špendlíkem.
+struct PinPickerView: View {
+    let start: CLLocationCoordinate2D?
+    let onPick: (Place) -> Void
+    @State private var center: CLLocationCoordinate2D? = nil
+    @State private var busy = false
+
+    var body: some View {
+        ZStack {
+            PinMap(start: start, center: $center).ignoresSafeArea(edges: .bottom)
+            Image(systemName: "mappin")
+                .font(.system(size: 36, weight: .bold))
+                .foregroundStyle(.red)
+                .offset(y: -18)
+                .allowsHitTesting(false)
+            VStack {
+                Spacer()
+                Button {
+                    guard let c = center ?? start else { return }
+                    busy = true
+                    CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: c.latitude, longitude: c.longitude)) { pms, _ in
+                        let pm = pms?.first
+                        let street = [pm?.thoroughfare, pm?.subThoroughfare].compactMap { $0 }.joined(separator: " ")
+                        let name = street.isEmpty ? (pm?.name ?? T("Dropped pin")) : street
+                        onPick(Place(kind: .history, name: name, subtitle: pm?.locality ?? "", lat: c.latitude, lon: c.longitude))
+                        busy = false
+                    }
+                } label: {
+                    Label(busy ? T("Searching…") : T("Use this location"), systemImage: "checkmark").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
+                .disabled(busy)
+            }
+        }
+        .navigationTitle(T("Move the pin on the map"))
+    }
+}
+
+struct PinMap: UIViewRepresentable {
+    let start: CLLocationCoordinate2D?
+    @Binding var center: CLLocationCoordinate2D?
+
+    func makeCoordinator() -> Coord { Coord(self) }
+    func makeUIView(context: Context) -> MKMapView {
+        let v = MKMapView()
+        v.delegate = context.coordinator
+        v.showsUserLocation = true
+        if let s = start {
+            v.setRegion(MKCoordinateRegion(center: s, latitudinalMeters: 600, longitudinalMeters: 600), animated: false)
+        }
+        return v
+    }
+    func updateUIView(_ v: MKMapView, context: Context) {}
+
+    final class Coord: NSObject, MKMapViewDelegate {
+        let parent: PinMap
+        init(_ p: PinMap) { parent = p }
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            parent.center = mapView.centerCoordinate
         }
     }
 }
@@ -788,9 +1051,13 @@ struct FavoritesSettingsView: View {
             Section(T("Favorite places")) {
                 if m.places.others.isEmpty { Text(T("None yet")).foregroundStyle(.secondary) }
                 ForEach(m.places.others) { p in
-                    VStack(alignment: .leading) {
-                        Text(p.name)
-                        if !p.subtitle.isEmpty { Text(p.subtitle).font(.caption).foregroundStyle(.secondary) }
+                    NavigationLink { FavoriteEditorView(place: p) } label: {
+                        Label {
+                            VStack(alignment: .leading) {
+                                Text(p.name)
+                                if !p.subtitle.isEmpty { Text(p.subtitle).font(.caption).foregroundStyle(.secondary) }
+                            }
+                        } icon: { Image(systemName: p.icon ?? "star.fill") }
                     }
                 }
                 .onDelete { idx in

@@ -41,6 +41,23 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
 }
 
 // MARK: - Uložená nastavení
+struct NavOptions: Codable {
+    var alternatives = true
+    var autoReroute = true
+    var offRoute = 40
+    var imperial = false
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = NavOptions()
+        alternatives = (try? c.decodeIfPresent(Bool.self, forKey: .alternatives)) ?? d.alternatives
+        autoReroute = (try? c.decodeIfPresent(Bool.self, forKey: .autoReroute)) ?? d.autoReroute
+        offRoute = (try? c.decodeIfPresent(Int.self, forKey: .offRoute)) ?? d.offRoute
+        imperial = (try? c.decodeIfPresent(Bool.self, forKey: .imperial)) ?? d.imperial
+    }
+}
+
 struct SavedSettings: Codable {
     var opts = TestOptions()
     var autoConnect = true
@@ -49,6 +66,7 @@ struct SavedSettings: Codable {
     var assist = AssistSettings()
     var language: AppLanguage = .en
     var voice = VoiceSettings()
+    var nav = NavOptions()
 
     init() {}
     init(from decoder: Decoder) throws {
@@ -56,6 +74,7 @@ struct SavedSettings: Codable {
         let d = SavedSettings()
         language = (try? c.decodeIfPresent(AppLanguage.self, forKey: .language)) ?? d.language
         voice = (try? c.decodeIfPresent(VoiceSettings.self, forKey: .voice)) ?? d.voice
+        nav = (try? c.decodeIfPresent(NavOptions.self, forKey: .nav)) ?? d.nav
         opts = (try? c.decodeIfPresent(TestOptions.self, forKey: .opts)) ?? d.opts
         autoConnect = (try? c.decodeIfPresent(Bool.self, forKey: .autoConnect)) ?? d.autoConnect
         avoidHighways = (try? c.decodeIfPresent(Bool.self, forKey: .avoidHighways)) ?? d.avoidHighways
@@ -96,6 +115,13 @@ final class AppModel: ObservableObject {
         didSet { L10n.lang = language; saveSettings(); pushBikeFavorites() }
     }
     @Published var voiceSettings = VoiceSettings() { didSet { voice.settings = voiceSettings; saveSettings() } }
+    @Published var navOpts = NavOptions() { didSet { applyNavOptions(); saveSettings() } }
+
+    private func applyNavOptions() {
+        navigator.autoReroute = navOpts.autoReroute
+        navigator.offRouteMeters = Double(navOpts.offRoute)
+        Units.imperial = navOpts.imperial
+    }
     @Published var gpsText = "–"
 
     // Navigace
@@ -133,6 +159,8 @@ final class AppModel: ObservableObject {
         L10n.lang = saved.language
         language = saved.language
         voiceSettings = saved.voice
+        navOpts = saved.nav
+        applyNavOptions()
         voice.settings = saved.voice
         log("NaviTest \(version) spuštěn, iOS \(UIDevice.current.systemVersion), jazyk \(saved.language.rawValue)")
         opts = saved.opts
@@ -152,6 +180,8 @@ final class AppModel: ObservableObject {
         navigator.onReroute = { [weak self] loc in self?.reroute(from: loc) }
         let engine = assistEngine
         navigator.limitAt = { a in engine.limit(at: a) }
+        navigator.freeInfo = { (engine.currentFreeLimit, engine.currentFreeRoad) }
+        session.poiProvider = { engine.mapPOIs() }
 
         let t = NL.selfTest()
         selfTestSummary = "\(t.passed)/\(t.total) \(t.passed == t.total ? "OK" : "CHYBA")"
@@ -163,24 +193,18 @@ final class AppModel: ObservableObject {
             guard let self = self else { return }
             self.navigator.update(loc)
             // Hlas jede z polohy – funguje i se zamčeným telefonem
-            if self.navigator.hasRoute, let snap = self.navigator.snapshot() {
-                self.voice.update(snap, speed: max(0, loc.speed))
-                // Asistence jezdce: rychlost přednostně z motorky (přesnější), jinak z GPS
-                let bike = self.session.bikeSpeedKmh
-                let kmh = (self.bikeConnected && bike >= 0) ? bike : max(0, loc.speed * 3.6)
-                for act in self.assistEngine.update(along: snap.along, speedKmh: kmh, settings: self.assist) {
-                    switch act {
-                    case .dash(let m): self.session.enqueue([m])
-                    case .sound(let kind, let lim):
-                        let snd: AlertSound
-                        switch kind {
-                        case .camera, .redLight: snd = self.assist.cameraSound
-                        case .section: snd = self.assist.sectionSound
-                        case .school: snd = self.assist.schoolSound
-                        case .speeding: snd = self.assist.speedingSound
-                        }
-                        self.voice.playAlert(snd, kind: kind, limit: lim, volume: self.assist.alertVolume)
-                    }
+            let snap = self.navigator.snapshot()
+            if self.navigator.hasRoute, let s = snap { self.voice.update(s, speed: max(0, loc.speed)) }
+            // Asistence jezdce – po trase i ve volné jízdě; rychlost z motorky (když je připojená) i z GPS
+            let bike = self.bikeConnected ? self.session.bikeSpeedKmh : -1
+            let along: Double? = (self.navigator.hasRoute && (snap?.guiding ?? false)) ? snap?.along : nil
+            let acts = self.assistEngine.update(along: along, position: loc.coordinate,
+                                                heading: snap?.heading ?? max(0, loc.course),
+                                                bikeKmh: bike, gpsKmh: max(0, loc.speed * 3.6), settings: self.assist)
+            for act in acts {
+                switch act {
+                case .dash(let m): self.session.enqueue([m])
+                case .sound(let kind, let lim): self.playAssistAlert(kind, limit: lim)
                 }
             }
             if Date().timeIntervalSince(self.lastGpsUI) > 1 {
@@ -225,6 +249,7 @@ final class AppModel: ObservableObject {
         s.assist = assist
         s.language = language
         s.voice = voiceSettings
+        s.nav = navOpts
         s.save()
     }
 
@@ -239,6 +264,7 @@ final class AppModel: ObservableObject {
         assist = d.assist
         language = d.language
         voiceSettings = d.voice
+        navOpts = d.nav
         Log.shared.enabled = false
         places.clearAll()
         pushBikeFavorites()
@@ -340,6 +366,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Zvuk upozornění podle nastavení (tón a/nebo hlas).
+    func playAssistAlert(_ kind: AlertKind, limit: Int) {
+        let a = assist
+        var snd = a.cameraSound
+        var voiceOn = a.cameraVoice
+        switch kind {
+        case .camera, .redLight: break
+        case .section: snd = a.sectionSound; voiceOn = a.sectionVoice
+        case .school: snd = a.schoolSound; voiceOn = a.schoolVoice
+        case .speeding: snd = a.speedingSound; voiceOn = a.speedingVoice
+        }
+        voice.playAlert(snd, voice: voiceOn, kind: kind, limit: limit, volume: a.alertVolume)
+    }
+
     // MARK: Čerpací stanice pro motorku
     private var gasSearchToken = 0
     private var gasAnswered = false
@@ -421,7 +461,6 @@ final class AppModel: ObservableObject {
         if let h = places.home { list.append(BikeFav(name: T("Home"), coordinate: h.coordinate, tag: "home")) }
         if let w = places.work { list.append(BikeFav(name: T("Work"), coordinate: w.coordinate, tag: "work")) }
         for p in places.others { list.append(BikeFav(name: p.name, coordinate: p.coordinate, tag: p.id.uuidString)) }
-        for p in places.history.prefix(5) { list.append(BikeFav(name: p.name, coordinate: p.coordinate, tag: p.id.uuidString)) }
         session.setBikeFavorites(list, home: places.home != nil, office: places.work != nil)
     }
 
@@ -442,6 +481,8 @@ final class AppModel: ObservableObject {
         destination = last
         selectedPlace = nil
         searchResults = []          // po spuštění navigace seznam výsledků nechceme
+        previewRoutes = []
+        previewStops = []
         activeStops = stops
         if opts.navSource != .real { opts.navSource = .real }
         calculate(from: MKMapItem.forCurrentLocation(), reason: stops.count > 1 ? "nová trasa (\(stops.count - 1) průjezdní body)" : "nová trasa")
@@ -455,15 +496,40 @@ final class AppModel: ObservableObject {
     }
     func removeStops(at offsets: IndexSet) { planStops.remove(atOffsets: offsets) }
     func moveStops(from: IndexSet, to: Int) { planStops.move(fromOffsets: from, toOffset: to) }
-    func clearPlan() { planStops = [] }
-    func navigatePlan() { if !planStops.isEmpty { navigate(stops: planStops) } }
-    func saveRoute(name: String) {
+    func clearPlan() { planStops = []; editingRouteId = nil; editingRouteName = "" }
+    func navigatePlan() { if !planStops.isEmpty { preview(stops: planStops) } }
+    func replaceStop(at i: Int, with p: Place) { if i < planStops.count { planStops[i] = p } }
+    @Published var editingRouteId: UUID? = nil
+    @Published var editingRouteName = ""
+    /// Uložení: upravovaná trasa se přepíše, jinak (nebo „jako novou“) vznikne nová.
+    func saveRoute(name: String, asNew: Bool = false) {
         let n = name.trimmingCharacters(in: .whitespaces)
         guard !n.isEmpty, !planStops.isEmpty else { return }
-        places.saveRoute(name: n, stops: planStops)
-        flash(T("Route saved"))
+        if let id = editingRouteId, !asNew {
+            places.updateRoute(id: id, name: n, stops: planStops)
+            flash(T("Route updated"))
+        } else {
+            places.saveRoute(name: n, stops: planStops)
+            editingRouteId = places.routes.first(where: { $0.name == n })?.id
+            flash(T("Route saved"))
+        }
+        editingRouteName = n
     }
-    func loadRoute(_ r: SavedRoute) { planStops = r.stops }
+
+    /// Oblíbené místo s vlastním názvem a ikonou (nové nebo úprava).
+    func saveFavorite(_ p: Place, name: String, icon: String?) {
+        var n = p
+        n.name = name.trimmingCharacters(in: .whitespaces).isEmpty ? p.name : name
+        n.icon = icon
+        if p.kind == .favorite && places.others.contains(where: { $0.id == p.id }) {
+            places.updateFavorite(n)
+        } else {
+            places.addFavorite(n)
+        }
+        pushBikeFavorites()
+        flash(T("Added to favorites"))
+    }
+    func loadRoute(_ r: SavedRoute) { planStops = r.stops; editingRouteId = r.id; editingRouteName = r.name }
 
     private func navigateFromBike(_ fav: BikeFav) {
         let all = places.favorites + places.history
@@ -498,57 +564,122 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Spočítá trasu po úsecích: odkud → zastávka 1 → zastávka 2 → … → cíl.
-    private func calculate(from source: MKMapItem, reason: String) {
-        let stops = activeStops
-        guard !stops.isEmpty else { return }
+    /// Spočítá trasu po úsecích (odkud → zastávky → cíl). U jednoho cíle umí i alternativy (max 3).
+    private func computeRoutes(from source: MKMapItem, stops: [Place], alternatives: Bool,
+                               reason: String, completion: @escaping ([NavRoute]?) -> Void) {
+        guard !stops.isEmpty else { completion(nil); return }
         calculating = true
         var legs: [MKRoute] = []
         func leg(_ i: Int, from src: MKMapItem) {
-            if i >= stops.count { finish(legs, stops: stops, reason: reason); return }
             let req = MKDirections.Request()
             req.source = src
             req.destination = stops[i].mapItem
             req.transportType = .automobile
-            req.requestsAlternateRoutes = false
+            req.requestsAlternateRoutes = alternatives && stops.count == 1
             req.highwayPreference = avoidHighways ? .avoid : .any
             req.tollPreference = avoidTolls ? .avoid : .any
             MKDirections(request: req).calculate { [weak self] resp, err in
                 guard let self = self else { return }
-                guard let route = resp?.routes.first else {
+                guard let routes = resp?.routes, let first = routes.first else {
                     self.calculating = false
                     log("❌ Trasa (\(reason)), úsek \(i + 1): \(err?.localizedDescription ?? "žádná trasa")")
                     self.flash(T("Route could not be calculated"))
+                    completion(nil)
                     return
                 }
-                legs.append(route)
-                leg(i + 1, from: stops[i].mapItem)
+                if stops.count == 1 {
+                    self.calculating = false
+                    let list = (alternatives ? Array(routes.prefix(3)) : [first])
+                    completion(list.map { NavRoute(routes: [$0], names: [stops[0].name]) })
+                    return
+                }
+                legs.append(first)
+                if i + 1 >= stops.count {
+                    self.calculating = false
+                    completion([NavRoute(routes: legs, names: stops.map { $0.name })])
+                } else {
+                    leg(i + 1, from: stops[i].mapItem)
+                }
             }
         }
         leg(0, from: source)
     }
 
-    private func finish(_ legs: [MKRoute], stops: [Place], reason: String) {
-        calculating = false
-        let name = stops.last?.name ?? T("Destination")
-        let r = NavRoute(routes: legs, names: stops.map { $0.name })
+    private func calculate(from source: MKMapItem, reason: String) {
+        computeRoutes(from: source, stops: activeStops, alternatives: false, reason: reason) { [weak self] routes in
+            if let r = routes?.first { self?.activate(r, reason: reason) }
+        }
+    }
+
+    /// Spustí navigaci po dané trase.
+    private func activate(_ r: NavRoute, reason: String) {
+        let name = activeStops.last?.name ?? T("Destination")
         navigator.setRoute(r)
         voice.routeStarted(generation: navigator.routeGeneration, reroute: reason == "přepočet")
-        assistEngine.load(points: r.points, cum: r.cum, generation: navigator.routeGeneration)
+        assistEngine.setRoute(points: r.points, cum: r.cum, generation: navigator.routeGeneration)
         routeCoords = r.points.map { $0.coordinate }
         routeVersion += 1
-        routeSummary = String(format: "%@ · %.1f km · %.0f min · %ld manévrů",
-                              name, r.total / 1000, r.expectedTime / 60, r.maneuvers.count)
+        routeSummary = "\(name) · " + routeText(r)
         routeSteps = r.maneuvers.map { m in
-            let (d, u) = formatDistance(m.at)
-            let ds = u == "m" ? "\(Int(d)) m" : String(format: "%.1f km", d)
-            return "\(ds) · \(TurnIcon.name(m.icon)) (\(m.icon)) · \(m.text)"
+            "\(formatDistanceText(m.at)) · \(TurnIcon.name(m.icon)) (\(m.icon)) · \(m.text)"
         }
-        log("🧭 Trasa (\(reason)): \(routeSummary)")
+        log("🧭 Trasa (\(reason)): \(routeSummary) · \(r.maneuvers.count) manévrů")
         for s in routeSteps { log("   \(s)") }
         let n = TileStore.shared.prefetchRoute(r.points)
         log("🗺️ Předstahuji \(n) mapových dlaždic podél trasy")
         refreshGuidance()
+    }
+
+    /// „84.5 km · 1 h 40 min“
+    func routeText(_ r: NavRoute) -> String {
+        formatDistanceText(r.total) + " · " + formatDuration(minutes: Int((r.expectedTime / 60).rounded()))
+    }
+
+    // MARK: Náhled trasy (z telefonu: karta místa, plánovač, uložené trasy)
+    @Published var previewRoutes: [NavRoute] = []
+    @Published var previewIndex = 0 { didSet { showPreviewRoute() } }
+    private var previewStops: [Place] = []
+    var isPreviewing: Bool { !previewRoutes.isEmpty }
+    var previewName: String { previewStops.last?.name ?? "" }
+
+    func preview(stops: [Place]) {
+        guard !stops.isEmpty else { return }
+        selectedPlace = nil
+        searchResults = []
+        previewStops = stops
+        computeRoutes(from: MKMapItem.forCurrentLocation(), stops: stops,
+                      alternatives: navOpts.alternatives && stops.count == 1, reason: "náhled") { [weak self] routes in
+            guard let self = self, let routes = routes, !routes.isEmpty else { return }
+            self.previewRoutes = routes
+            self.previewIndex = 0
+            self.showPreviewRoute()
+        }
+    }
+
+    private func showPreviewRoute() {
+        guard previewIndex < previewRoutes.count else { return }
+        routeCoords = previewRoutes[previewIndex].points.map { $0.coordinate }
+        routeVersion += 1
+    }
+
+    func startPreview() {
+        guard previewIndex < previewRoutes.count, let last = previewStops.last else { return }
+        let r = previewRoutes[previewIndex]
+        activeStops = previewStops
+        destination = last
+        places.addHistory(last)
+        pushBikeFavorites()
+        if opts.navSource != .real { opts.navSource = .real }
+        previewRoutes = []
+        previewStops = []
+        activate(r, reason: "nová trasa")
+    }
+
+    func cancelPreview() {
+        previewRoutes = []
+        previewStops = []
+        routeCoords = []
+        routeVersion += 1
     }
 
     func endNavigation() {

@@ -126,6 +126,7 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
         arrivedSpoken = false
         routeGen = -1
         mentionedNextKey = ""
+        pendingExit = nil
         synth.stopSpeaking(at: .immediate)
     }
 
@@ -140,8 +141,17 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
         if reroute { say(cs ? "Přepočítávám trasu." : "Recalculating.") }
     }
 
+    private var pendingExit: Double? = nil      // kde říct „Nyní vyjeďte“ (jen četnost Hodně)
+
     func update(_ s: NavSnapshot, speed: Double) {
         guard settings.enabled, s.guiding else { return }
+        // „Nyní vyjeďte“ u výjezdu z kruháče (jen Hodně)
+        if let ex = pendingExit {
+            if s.along >= ex - 12 {
+                pendingExit = nil
+                if settings.frequency == .high { say(cs ? "Nyní vyjeďte." : "Take the exit now.") }
+            } else if s.along > ex + 100 { pendingExit = nil }
+        }
         if s.arrived {
             if !arrivedSpoken { arrivedSpoken = true; say(arrivalNow(s.icon)) }
             return
@@ -149,40 +159,56 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
         let key = "\(s.maneuverIndex)|\(s.icon)|\(s.road)"
         if key != maneuverKey { maneuverKey = key; spokenLevel = 0 }
 
-        // Hranice vzdáleností podle rychlosti (m/s; ve stoje počítáme ~30 km/h)
+        // Vzdálenosti podle rychlosti (m/s; ve stoje ~30 km/h): při 50 km/h ~220 m, ~110 m a ~40 m
         let v = max(8.0, speed)
-        let nowD = max(30.0, v * 3.5)
-        let nearD = min(400.0, max(70.0, v * 8))
-        let midD = min(900.0, max(200.0, v * 16))
-        let farD = min(2000.0, max(400.0, v * 35))
-        // Úrovně podle četnosti (od nejvzdálenější); „nyní“ je vždy poslední
-        let tiers: [Double]
-        switch settings.frequency {
-        case .low: tiers = [nearD]
-        case .normal: tiers = [midD, nearD]
-        case .high: tiers = [farD, midD, nearD]
-        }
+        let atD = min(90.0, max(25.0, v * 3))
+        let nearD = min(400.0, max(100.0, v * 8))
+        let farD = min(1000.0, max(220.0, v * 16))
+        // Málo: předem + u křižovatky; Normálně/Hodně: dvakrát předem + u křižovatky
+        let tiers: [Double] = settings.frequency == .low ? [farD] : [farD, nearD]
         let d = s.toNext
 
-        if d <= nowD {
+        if d <= atD {
             if spokenLevel <= tiers.count {
                 spokenLevel = tiers.count + 1
-                say(instruction(s, distance: nil))
+                say(atPhrase(s))
+                if TurnIcon.isRoundabout(s.icon) && s.rbExitAt > 0 { pendingExit = s.rbExitAt }
             }
             return
         }
-        // Pokud byl tento manévr už ohlášen přes „poté …“ a je blízko, počkáme až na „nyní“
+        // Manévr už ohlášený přes „poté …“ a blízko → počkat na hlášení u křižovatky
         if !mentionedNextKey.isEmpty && key.hasPrefix(mentionedNextKey) && d < nearD * 1.5 { return }
-        // Nejbližší úroveň, do které jsme se dostali a která ještě nezazněla
         var reached = 0
         for (i, t) in tiers.enumerated() where d <= t { reached = i + 1 }
         guard reached > spokenLevel else { return }
-        // Nehlásit těsně po předchozím pokynu (kromě „nyní“)
-        if Date().timeIntervalSince(lastSpoke) < 6 { return }
-        // Nehlásit „za 50 m“, když je to skoro „nyní“ – radši počkat
-        if d < nowD * 1.6 { return }
+        if Date().timeIntervalSince(lastSpoke) < 6 { return }          // ne těsně po sobě
+        if d < atD * 1.6 { return }                                     // skoro u křižovatky – počkat
         spokenLevel = reached
         say(instruction(s, distance: d))
+    }
+
+    /// Hlášení přímo u křižovatky / kruháče: krátké, bez vzdálenosti.
+    private func atPhrase(_ s: NavSnapshot) -> String {
+        var text: String
+        if TurnIcon.isRoundabout(s.icon) {
+            let n = s.rbExit
+            if n >= 1 && n <= 6 {
+                let csOrd = ["prvním", "druhým", "třetím", "čtvrtým", "pátým", "šestým"][n - 1]
+                let enOrd = ["first", "second", "third", "fourth", "fifth", "sixth"][n - 1]
+                text = cs ? "Vyjeďte \(csOrd) výjezdem\(onto(s))" : "Take the \(enOrd) exit\(onto(s))"
+            } else {
+                text = actionPhrase(s)
+            }
+        } else if settings.frequency == .high {
+            text = (cs ? "Nyní " : "Now ") + lowerFirst(actionPhrase(s))
+        } else {
+            text = actionPhrase(s)
+        }
+        if let n = s.nextIcon, s.nextGap < 150, !TurnIcon.isArrival(n) {
+            text += (cs ? ", poté " : ", then ") + lowerFirst(shortAction(n))
+            mentionedNextKey = "\(s.maneuverIndex + 1)|\(n)|"
+        }
+        return text + "."
     }
 
     func sample() {
@@ -196,27 +222,31 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
     // MARK: Upozornění asistence (tón nebo hlas)
     private var tonePlayer: AVAudioPlayer?
 
-    func playAlert(_ sound: AlertSound, kind: AlertKind, limit: Int, volume: Double) {
-        if sound == .voice {
-            say(alertText(kind, limit: limit), volume: volume)
-            return
+    /// Upozornění: nejdřív tón (když není „Ticho“), hned po něm věta (když je zapnutý hlas).
+    func playAlert(_ sound: AlertSound, voice: Bool, kind: AlertKind, limit: Int, volume: Double) {
+        var delay = 0.0
+        if let data = ToneGenerator.wav(sound) {
+            configureSession()
+            do {
+                let p = try AVAudioPlayer(data: data)
+                p.volume = Float(min(1, max(0.1, volume)))
+                p.delegate = self
+                p.play()
+                tonePlayer = p
+                delay = p.duration + 0.15
+                log("🔔 Tón: \(sound.rawValue)")
+            } catch {
+                log("⚠️ Tón: \(error.localizedDescription)")
+            }
         }
-        guard let data = ToneGenerator.wav(sound) else { return }
-        configureSession()
-        do {
-            let p = try AVAudioPlayer(data: data)
-            p.volume = Float(min(1, max(0.1, volume)))
-            p.delegate = self
-            p.play()
-            tonePlayer = p
-            log("🔔 Tón: \(sound.rawValue)")
-        } catch {
-            log("⚠️ Tón: \(error.localizedDescription)")
+        if voice {
+            let text = alertText(kind, limit: limit)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.say(text, volume: volume) }
         }
     }
 
     private func alertText(_ k: AlertKind, limit: Int) -> String {
-        let l = limit > 0 ? ", \(limit)" : ""
+        let l = limit > 0 ? ", \(speedValue(kmh: limit).0)" : ""
         switch k {
         case .camera: return cs ? "Radar\(l)." : "Speed camera\(l)."
         case .redLight: return cs ? "Kamera na červenou." : "Red light camera."
@@ -328,6 +358,16 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
     }
 
     private func distancePhrase(_ m: Double) -> String {
+        if Units.imperial {
+            let ft = m * 3.28084
+            if ft < 1000 {
+                let r = max(100, (ft / 100).rounded() * 100)
+                return cs ? "Za \(Int(r)) stop" : "In \(Int(r)) feet"
+            }
+            let mi = (m / 1609.344 * 10).rounded() / 10
+            let t = String(format: "%.1f", mi)
+            return cs ? "Za \(t.replacingOccurrences(of: ".", with: ",")) míle" : (mi == 1 ? "In 1 mile" : "In \(t) miles")
+        }
         if m < 1000 {
             let r = m >= 300 ? (m / 100).rounded() * 100 : max(50, (m / 50).rounded() * 50)
             return cs ? "Za \(Int(r)) metrů" : "In \(Int(r)) meters"

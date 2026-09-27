@@ -12,6 +12,7 @@ struct Place: Codable, Identifiable, Equatable {
     var lat: Double
     var lon: Double
     var date = Date()
+    var icon: String? = nil            // SF Symbol vybraný uživatelem (oblíbená místa)
 
     var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: lat, longitude: lon) }
 
@@ -102,6 +103,22 @@ final class PlacesStore: ObservableObject {
         n.id = UUID(); n.kind = .favorite; n.date = Date()
         favorites.append(n)
         save()
+    }
+
+    /// Úprava existujícího oblíbeného místa (název, ikona).
+    func updateFavorite(_ p: Place) {
+        guard let i = favorites.firstIndex(where: { $0.id == p.id }) else { return }
+        favorites[i] = p
+        save()
+    }
+
+    /// Úprava uložené trasy na místě (název, zastávky).
+    func updateRoute(id: UUID, name: String, stops: [Place]) {
+        guard let i = routes.firstIndex(where: { $0.id == id }) else { return }
+        routes[i].name = name
+        routes[i].stops = stops
+        routes[i].date = Date()
+        saveRoutes()
     }
 
     func remove(_ p: Place) {

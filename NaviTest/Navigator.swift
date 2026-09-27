@@ -10,6 +10,7 @@ struct RouteManeuver {
     var street: String = ""          // čistý název ulice pro hlas (může být prázdný)
     var rbExit: Int = 0
     var rbAround: Double = 180
+    var rbExitAt: Double = -1      // kde se z kruháče vyjíždí (metry od začátku trasy), -1 = neznámé
 }
 
 /// Trasa z Apple Map převedená na jednu lomenou čáru + seznam manévrů na ní.
@@ -137,6 +138,52 @@ final class NavRoute {
                                      coordinate: pts[pts.count - 1].coordinate))
         }
         man.sort { $0.at < $1.at }
+
+        // Apple dává kruháč často jako dva pokyny („Jeďte na kruhový objezd“ + „Vyjeďte z kruhového objezdu“)
+        // → spojit do jednoho: v místě vjezdu, se směrem a číslem výjezdu z druhého pokynu
+        var merged: [RouteManeuver] = []
+        var mi = 0
+        while mi < man.count {
+            let m = man[mi]
+            let t = m.text.lowercased()
+            let isEnter = t.contains("na kruhový objezd") || t.contains("enter the roundabout") || t.contains("take the roundabout")
+            if isEnter, mi + 1 < man.count {
+                let x = man[mi + 1]
+                let xt = x.text.lowercased()
+                if (TurnIcon.isRoundabout(x.icon) || xt.contains("kruhov") || xt.contains("roundabout")), x.at - m.at < 300 {
+                    var around: Double
+                    if xt.contains("doleva") || xt.contains("vlevo") || xt.contains(" left") { around = 270 }
+                    else if xt.contains("doprava") || xt.contains("vpravo") || xt.contains(" right") { around = 90 }
+                    else if xt.contains("rovně") || xt.contains("straight") { around = 180 }
+                    else {
+                        let inB = NavRoute.bearing(NavRoute.pointAt(points: pts, cum: c, d: m.at - 40),
+                                                   NavRoute.pointAt(points: pts, cum: c, d: m.at))
+                        let outB = NavRoute.bearing(NavRoute.pointAt(points: pts, cum: c, d: x.at),
+                                                    NavRoute.pointAt(points: pts, cum: c, d: x.at + 150))
+                        var dd = outB - inB
+                        while dd > 180 { dd -= 360 }
+                        while dd < -180 { dd += 360 }
+                        around = 180 - dd
+                        if around <= 0 { around += 360 }
+                        if around > 360 { around -= 360 }
+                    }
+                    var nm = RouteManeuver(at: m.at, icon: TurnIcon.roundabout(around: around), road: x.road, text: x.text,
+                                           coordinate: m.coordinate, street: x.street,
+                                           rbExit: x.rbExit > 0 ? x.rbExit : m.rbExit, rbAround: around)
+                    nm.rbExitAt = x.at
+                    merged.append(nm)
+                    mi += 2
+                    continue
+                }
+            }
+            var single = m
+            if TurnIcon.isRoundabout(m.icon) && m.rbExitAt < 0 {
+                single.rbExitAt = m.at + 0.26 * m.rbAround      // odhad: malý kruháč, ~15 m poloměr
+            }
+            merged.append(single)
+            mi += 1
+        }
+        man = merged
         vias = viaList
         maneuvers = man
     }
@@ -291,6 +338,9 @@ final class Navigator {
     private var along: Double = 0
     private var matchDist: Double = .infinity
     private var offCount = 0
+    /// Nastavení navigace: automatický přepočet a vzdálenost pro „sjetí z trasy“.
+    var autoReroute = true
+    var offRouteMeters: Double = 40
     private var lastLocation: CLLocation?
     private var fixTime = Date.distantPast
     private var heading: Double = 0
@@ -305,6 +355,8 @@ final class Navigator {
     var onReroute: ((CLLocation) -> Void)?
     /// Rychlostní limit v místě trasy (z asistence jezdce), 0 = neznámý.
     var limitAt: ((Double) -> Int)?
+    /// Limit a název silnice ve volné jízdě (z asistence).
+    var freeInfo: (() -> (Int, String))?
 
     var hasRoute: Bool { lock.lock(); defer { lock.unlock() }; return route != nil }
     var location: CLLocation? { lock.lock(); defer { lock.unlock() }; return lastLocation }
@@ -334,9 +386,9 @@ final class Navigator {
         matchedSeg = m.seg; along = m.along; matchDist = m.dist
         if !(loc.speed > 2 && loc.course >= 0) { heading = r.bearing(at: along) }
 
-        let threshold = max(40, loc.horizontalAccuracy * 1.5)
+        let threshold = max(offRouteMeters, loc.horizontalAccuracy * 1.5)
         if m.dist > threshold && loc.horizontalAccuracy > 0 && loc.horizontalAccuracy < 60 { offCount += 1 } else { offCount = 0 }
-        if offCount >= 3 && Date().timeIntervalSince(lastReroute) > 15 && arrivedAt == nil {
+        if autoReroute && offCount >= 3 && Date().timeIntervalSince(lastReroute) > 15 && arrivedAt == nil {
             lastReroute = Date()
             offCount = 0
             let cb = onReroute
@@ -415,6 +467,7 @@ final class Navigator {
             s.guiding = false
             s.position = spd > 1.5 ? moved(loc.coordinate, heading: heading, dist: spd * dt) : loc.coordinate
             s.heading = heading
+            if let f = freeInfo { let (l, r) = f(); s.speedLimit = Float(l); s.currentRoad = r }
             return s
         }
         let onRoute = matchDist < 40
@@ -435,6 +488,7 @@ final class Navigator {
         s.maneuverIndex = idx
         s.rbExit = m.rbExit
         s.rbAround = m.rbAround
+        s.rbExitAt = m.rbExitAt
         s.street = m.street
         if idx + 1 < r.maneuvers.count {
             let nx = r.maneuvers[idx + 1]

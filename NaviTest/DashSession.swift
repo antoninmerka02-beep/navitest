@@ -43,6 +43,7 @@ struct TestOptions: Codable {
     var dayNight: DayNightMode = .auto
     var tileURL: String = ""          // prázdné = OpenFreeMap
     var threeD = false                // 3D (nakloněný) pohled
+    var autoZoom = true               // oddálit mapu s rychlostí
     var streetNames = true            // názvy ulic podél silnic
 
     init() {}
@@ -64,6 +65,7 @@ struct TestOptions: Codable {
         dayNight = (try? c.decodeIfPresent(DayNightMode.self, forKey: .dayNight)) ?? d.dayNight
         tileURL = (try? c.decodeIfPresent(String.self, forKey: .tileURL)) ?? d.tileURL
         threeD = (try? c.decodeIfPresent(Bool.self, forKey: .threeD)) ?? d.threeD
+        autoZoom = (try? c.decodeIfPresent(Bool.self, forKey: .autoZoom)) ?? d.autoZoom
         streetNames = (try? c.decodeIfPresent(Bool.self, forKey: .streetNames)) ?? d.streetNames
     }
 }
@@ -116,6 +118,10 @@ final class DashSession {
     var onStatus: ((SessionStatus) -> Void)?
     /// Příkazy z joysticku / přístrojovky (49 stop trasy, 53 domů, …) – volá se na hlavním vlákně.
     var onBikeCommand: ((UInt8) -> Void)?
+    /// Radary, úseky, školy pro ikonky v mapě.
+    var poiProvider: (() -> [AssistPOI])?
+    private var lastFreeLimit: Float = -1
+    private var lastFreeRoad = "-"
     private var _bikeSpeed: Double = -1
     /// Rychlost z motorky v km/h (-1 = neznámá).
     var bikeSpeedKmh: Double { lock.lock(); defer { lock.unlock() }; return _bikeSpeed }
@@ -136,6 +142,7 @@ final class DashSession {
     // Den / noc
     private var night = false
     private var lastNightCheck = Date.distantPast
+    private var lastDayNightMode: DayNightMode? = nil
     private var nightSent: Bool? = nil
 
     // Stav, se kterým pracuje jen pracovní vlákno
@@ -208,6 +215,16 @@ final class DashSession {
     /// Nalezené čerpací stanice (z hlavního vlákna) – odešlou se při nejbližší příležitosti.
     func provideGasStations(_ list: [BikeFav]) {
         lock.lock(); pendingGas = list; lock.unlock()
+    }
+
+    /// Automatický zoom: ve městě beze změny, s rychlostí se mapa oddaluje (až 2,2× při 110 km/h).
+    private var smoothZoom = 1.0
+    private func zoomFactor(_ o: TestOptions) -> Double {
+        guard o.autoZoom else { smoothZoom = 1; return 1 }
+        let kmh = max(0, (navigator.location?.speed ?? 0) * 3.6)
+        let target = kmh < 40 ? 1.0 : min(2.2, 1.0 + (kmh - 40) / 70 * 1.2)
+        smoothZoom += (target - smoothZoom) * 0.05          // plynulý přechod
+        return smoothZoom
     }
 
     /// Tovární reset zoomu (provede pracovní vlákno).
@@ -323,7 +340,8 @@ final class DashSession {
             for m in q { send(m); log("➡️ \(NL.name(m.svc)) [\(m.payload.hex)]") }
             lock.lock(); let gas = pendingGas; pendingGas = nil; lock.unlock()
             if let g = gas { sendPoiList(g, kind: "gas") }
-            if Date().timeIntervalSince(lastNightCheck) > 30 {
+            if options.dayNight != lastDayNightMode || Date().timeIntervalSince(lastNightCheck) > 30 {
+                lastDayNightMode = options.dayNight
                 lastNightCheck = Date()
                 night = computeNight(options)
                 if nightSent != night {
@@ -350,7 +368,7 @@ final class DashSession {
                 // Nová trasa (nebo přepočet, nebo nové připojení během navigace) → start trasy jako Garmin
                 if let n = nav, n.guiding {
                     let gen = o.navSource == .real ? navigator.routeGeneration : -2   // simulace = jedna „trasa“
-                    if gen != lastRouteGen {
+                    if gen != lastRouteGen && (mode == .map || mode == .tbt) {
                         lastRouteGen = gen
                         sendRouteStart()
                         tbtListStart = -1          // po startu trasy hned nový seznam odboček
@@ -363,6 +381,18 @@ final class DashSession {
                     tbtLastActive = -1
                 }
                 if o.sendNavData, let n = nav, n.guiding { sendNav(n, o) }
+                // Volná jízda: limit a ulice podle mapových dat
+                if o.sendNavData, let n = nav, !n.guiding {
+                    if n.speedLimit != lastFreeLimit {
+                        lastFreeLimit = n.speedLimit
+                        let (v, u) = speedValue(kmh: Int(n.speedLimit))
+                        send(NL.speedLimit(Float(v), unit: u))
+                    }
+                    if n.currentRoad != lastFreeRoad {
+                        lastFreeRoad = n.currentRoad
+                        send(NL.currentRoad(dashText(n.currentRoad)))
+                    }
+                } else { lastFreeLimit = -1; lastFreeRoad = "-" }
             }
 
             // 4) Obrázky – jen v režimu mapy, vždy až po ACK předchozího
@@ -381,11 +411,12 @@ final class DashSession {
                     }
                     var p = RenderParams()
                     p.quality = o.jpegQuality
-                    p.mpp = mpp()
+                    p.mpp = mpp() * zoomFactor(o)
                     p.northUp = o.northUp
                     p.dark = night
                     p.mapSource = o.mapSource
                     p.turnBox = o.turnBox
+                    p.pois = poiProvider?() ?? []
                     p.threeD = o.threeD
                     p.streetNames = o.streetNames
                     var snap: MapSnapshotProvider.Snap? = nil
@@ -474,10 +505,16 @@ final class DashSession {
                 send(NL.flag(2, lastGuiding ?? false)); send(NL.flag(13, true)); send(NL.flag(12, true))
                 send(zoomMessage(show: false))
                 send(NL.dayNight(night ? 2 : 1))
-                if lastGuiding == true { lastRouteGen = -1 }   // start trasy a seznam odboček znovu
+                if lastGuiding == true {
+                    // jako Garmin: žádná nová startovací sekvence, jen aktuální stav
+                    send(NL.flag(2, true))
+                    tbtListStart = -1
+                    tbtLastActive = -1
+                    lastViaCount = -1
+                }
             } else if ct == 2 {
                 mode = .tbt
-                if lastGuiding == true { lastRouteGen = -1 }
+                if lastGuiding == true { send(NL.flag(2, true)); tbtListStart = -1; tbtLastActive = -1 }
                 tbtListStart = -1
             } else if ct == 3 {
                 sendFavoritesList()
@@ -558,7 +595,8 @@ final class DashSession {
         }
         if use4 { send(NL.nextTurn(icon: s.icon, dist: d, unit: u, road: dashText(s.road))) }
         send(NL.currentRoad(dashText(s.currentRoad)))
-        send(NL.speedLimit(s.speedLimit, unit: "km/h"))
+        let (slv, slu) = speedValue(kmh: Int(s.speedLimit))
+        send(NL.speedLimit(Float(slv), unit: slu))
         send(NL.eta(hour: s.etaHour, minute: s.etaMinute))
         status.navSent += 1
     }

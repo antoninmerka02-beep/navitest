@@ -96,6 +96,7 @@ struct NavSnapshot {
     var nextIcon: UInt8? = nil       // následující manévr (pro „poté …“)
     var nextGap: Double = 0          // vzdálenost mezi aktuálním a následujícím manévrem
     var rbExit: Int = 0              // kruháč: číslo výjezdu (0 = neznámé)
+    var rbExitAt: Double = -1        // kruháč: místo výjezdu (metry od začátku trasy)
     var rbAround: Double = 180       // kruháč: úhel objetý po kruhu
     // Pro kreslení mapy (skutečná navigace)
     var position: CLLocationCoordinate2D? = nil
@@ -108,15 +109,43 @@ struct NavSnapshot {
     var waypoints: [CLLocationCoordinate2D] = []   // zbývající průjezdní body (špendlíky)
 }
 
-/// Vzdálenost na hodnotu + jednotku jako StreetCross (m pod 1 km, jinak km).
+/// Jednotky (nastavení navigace). Čte se z více vláken – mění se jen výjimečně.
+enum Units {
+    static var imperial = false
+}
+
+/// Vzdálenost na hodnotu + jednotku jako StreetCross (m pod 1 km, jinak km; v mílích ft / mi).
 func formatDistance(_ meters: Double) -> (Float, String) {
+    if Units.imperial {
+        let ft = meters * 3.28084
+        if ft < 1000 { return (Float((ft / 50).rounded() * 50), "ft") }
+        return (Float((meters / 1609.344 * 10).rounded() / 10), "mi")
+    }
     if meters < 1000 { return (Float((meters / 10).rounded() * 10), "m") }
     return (Float((meters / 100).rounded() / 10), "km")
+}
+
+/// „350 m“ / „12.3 km“ / „0.8 mi“
+func formatDistanceText(_ meters: Double) -> String {
+    let (d, u) = formatDistance(meters)
+    return (u == "m" || u == "ft") ? "\(Int(d)) \(u)" : String(format: "%.1f %@", d, u)
+}
+
+/// Rychlost pro přístrojovku a hlas: km/h nebo mph.
+func speedValue(kmh: Int) -> (Int, String) {
+    Units.imperial ? (Int((Double(kmh) / 1.609344).rounded()), "mph") : (kmh, "km/h")
 }
 
 func etaComponents(secondsFromNow: Double) -> (Int, Int) {
     let c = Calendar.current.dateComponents([.hour, .minute], from: Date().addingTimeInterval(secondsFromNow))
     return (c.hour ?? 0, c.minute ?? 0)
+}
+
+/// „25 min“ / „1 h 30 min“
+func formatDuration(minutes m: Int) -> String {
+    if m < 60 { return "\(max(0, m)) min" }
+    let h = m / 60, r = m % 60
+    return r == 0 ? "\(h) h" : "\(h) h \(r) min"
 }
 
 // MARK: - Den / noc podle slunce (NOAA, přesnost na pár minut stačí)

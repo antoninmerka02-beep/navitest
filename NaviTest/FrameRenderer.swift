@@ -27,6 +27,7 @@ struct RenderParams {
     var turnBox = true
     var threeD = false
     var streetNames = true
+    var pois: [AssistPOI] = []
     var note = ""
 }
 
@@ -148,6 +149,15 @@ final class FrameRenderer {
         ctx.restoreGState()
         }
 
+        // Ikonky radarů, úsekových měření, kamer na červenou a školních zón
+        var drawnPOI = 0
+        for poi in p.pois where drawnPOI < 30 {
+            if let q = toScreen(local(poi.coordinate)), q.x > -12, q.x < W + 12, q.y > -12, q.y < H + 12 {
+                drawAlertIcon(ctx, at: q, kind: poi.kind)
+                drawnPOI += 1
+            }
+        }
+
         // Špendlíky průjezdních bodů
         if nav.guiding {
             for wp in nav.waypoints {
@@ -266,6 +276,52 @@ final class FrameRenderer {
             ctx.restoreGState()
             drawn += 1
         }
+    }
+
+    /// Malá ikonka upozornění (kolečko 18 px) – radar, úsekové měření, červená, školní zóna.
+    private func drawAlertIcon(_ ctx: CGContext, at p: CGPoint, kind: AlertKind) {
+        ctx.saveGState()
+        let r: CGFloat = 9
+        let ring: CGColor
+        switch kind {
+        case .section: ring = CGColor(red: 0.2, green: 0.55, blue: 1.0, alpha: 1)
+        case .school: ring = CGColor(red: 1.0, green: 0.8, blue: 0.0, alpha: 1)
+        case .redLight: ring = CGColor(red: 1.0, green: 0.25, blue: 0.2, alpha: 1)
+        default: ring = CGColor(red: 1.0, green: 0.45, blue: 0.1, alpha: 1)
+        }
+        ctx.setFillColor(CGColor(red: 0.08, green: 0.08, blue: 0.1, alpha: 0.9))
+        ctx.fillEllipse(in: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
+        ctx.setStrokeColor(ring); ctx.setLineWidth(2)
+        ctx.strokeEllipse(in: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
+        let white = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+        switch kind {
+        case .camera, .section:
+            // tělo fotoaparátu + objektiv
+            ctx.setFillColor(white)
+            ctx.fill(CGRect(x: p.x - 5, y: p.y - 3, width: 10, height: 6))
+            ctx.setFillColor(ring)
+            ctx.fillEllipse(in: CGRect(x: p.x - 2, y: p.y - 2, width: 4, height: 4))
+            if kind == .section {   // dvě čárky = úsek
+                ctx.setFillColor(white)
+                ctx.fill(CGRect(x: p.x - 5, y: p.y + 4, width: 3, height: 2))
+                ctx.fill(CGRect(x: p.x + 2, y: p.y + 4, width: 3, height: 2))
+            }
+        case .redLight:
+            let colors = [CGColor(red: 1, green: 0.2, blue: 0.2, alpha: 1), CGColor(red: 1, green: 0.8, blue: 0, alpha: 1),
+                          CGColor(red: 0.2, green: 0.9, blue: 0.3, alpha: 1)]
+            for (i, c) in colors.enumerated() {
+                ctx.setFillColor(c)
+                ctx.fillEllipse(in: CGRect(x: p.x - 2, y: p.y + 3.5 - CGFloat(i) * 4.5, width: 4, height: 4))
+            }
+        case .school, .speeding:
+            ctx.setFillColor(ring)
+            ctx.move(to: CGPoint(x: p.x, y: p.y + 6)); ctx.addLine(to: CGPoint(x: p.x - 6, y: p.y - 4)); ctx.addLine(to: CGPoint(x: p.x + 6, y: p.y - 4))
+            ctx.closePath(); ctx.fillPath()
+            ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+            ctx.fill(CGRect(x: p.x - 0.8, y: p.y - 1, width: 1.6, height: 4))
+            ctx.fill(CGRect(x: p.x - 0.8, y: p.y - 3, width: 1.6, height: 1.2))
+        }
+        ctx.restoreGState()
     }
 
     /// Mapový špendlík průjezdního bodu (hlavička 12 px, hrot v místě bodu).

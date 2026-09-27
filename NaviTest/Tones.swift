@@ -1,12 +1,19 @@
 import Foundation
 
-/// Zvuk upozornění: hlas (převod textu na řeč) nebo jeden z 10 generovaných tónů.
+/// Zvuk upozornění: ticho nebo jeden z 10 generovaných tónů (hlas je samostatný přepínač).
 enum AlertSound: String, Codable, CaseIterable, Identifiable {
-    case voice, beep, doubleBeep, tripleBeep, gong, laser, radar, chime, siren, warning, soft
+    case silence, beep, doubleBeep, tripleBeep, gong, laser, radar, chime, siren, warning, soft
     var id: String { rawValue }
+
+    // Starší verze měly „voice“ – převede se na ticho (hlas je teď přepínač)
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = AlertSound(rawValue: raw) ?? .silence
+    }
+
     var label: String {
         switch self {
-        case .voice: return T("Voice")
+        case .silence: return T("Silence")
         case .beep: return T("Beep")
         case .doubleBeep: return T("Double beep")
         case .tripleBeep: return T("Triple beep")
@@ -38,7 +45,7 @@ enum ToneGenerator {
     static func wav(_ s: AlertSound) -> Data? {
         let parts: [Part]
         switch s {
-        case .voice: return nil
+        case .silence: return nil
         case .beep: parts = [Part(f0: 1000, f1: 1000, dur: 0.18)]
         case .doubleBeep: parts = [Part(f0: 1100, f1: 1100, dur: 0.12, gap: 0.08), Part(f0: 1100, f1: 1100, dur: 0.12)]
         case .tripleBeep: parts = (0..<3).map { _ in Part(f0: 1250, f1: 1250, dur: 0.09, gap: 0.06) }
