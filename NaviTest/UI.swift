@@ -7,6 +7,11 @@ final class PlacePin: MKPointAnnotation {
     var place: Place?
 }
 
+/// Špendlík radaru / úsekového měření / kamery na červenou / školní zóny.
+final class AssistPin: MKPointAnnotation {
+    var kind: AlertKind = .camera
+}
+
 struct PhoneMapView: UIViewRepresentable {
     @ObservedObject var model: AppModel
 
@@ -79,6 +84,19 @@ struct PhoneMapView: UIViewRepresentable {
                 v.setCenter(p.coordinate, animated: true)
             }
         }
+        // Radary, úsekové měření, školní zóny – obnovit občas (data se stahují na pozadí)
+        c.assistTick += 1
+        if c.assistTick % 10 == 0 || c.assistPins.isEmpty {
+            let pois = model.assistEngine.mapPOIs()
+            v.removeAnnotations(c.assistPins)
+            c.assistPins = pois.map { poi in
+                let a = AssistPin()
+                a.coordinate = poi.coordinate
+                a.kind = poi.kind
+                return a
+            }
+            v.addAnnotations(c.assistPins)
+        }
         if c.recenter != model.recenterToken {
             c.recenter = model.recenterToken
             v.setUserTrackingMode(.follow, animated: true)
@@ -95,8 +113,33 @@ struct PhoneMapView: UIViewRepresentable {
         var selPin: MKPointAnnotation?
         var resultPins: [PlacePin] = []
         var resultIds: [UUID] = []
+        var assistPins: [AssistPin] = []
+        var assistTick = 0
 
         init(model: AppModel) { self.model = model }
+
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            guard let a = annotation as? AssistPin else { return nil }
+            let id = "assist"
+            let v = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKMarkerAnnotationView)
+                ?? MKMarkerAnnotationView(annotation: a, reuseIdentifier: id)
+            v.annotation = a
+            v.canShowCallout = false
+            v.markerTintColor = UIColor(red: 0.08, green: 0.08, blue: 0.1, alpha: 0.95)
+            switch a.kind {
+            case .camera: v.glyphImage = UIImage(systemName: "camera.fill")
+                v.markerTintColor = UIColor(red: 1.0, green: 0.45, blue: 0.1, alpha: 1)
+            case .section: v.glyphImage = UIImage(systemName: "camera.fill")
+                v.markerTintColor = UIColor(red: 0.2, green: 0.55, blue: 1.0, alpha: 1)
+            case .redLight: v.glyphImage = UIImage(systemName: "traffic.light.fill")
+                v.markerTintColor = UIColor(red: 1.0, green: 0.25, blue: 0.2, alpha: 1)
+            case .school: v.glyphImage = UIImage(systemName: "figure.child")
+                v.markerTintColor = UIColor(red: 1.0, green: 0.8, blue: 0.0, alpha: 1)
+            case .speeding: v.glyphImage = UIImage(systemName: "gauge.with.needle")
+            }
+            v.displayPriority = .defaultLow
+            return v
+        }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let l = overlay as? MKPolyline {
@@ -759,6 +802,14 @@ struct AssistSettingsView: View {
                 Toggle(T("Speeding"), isOn: $m.assist.speeding)
                 Stepper(TF("Warn above the limit by: %ld km/h", m.assist.tolerance), value: $m.assist.tolerance, in: 0...30)
                     .disabled(!m.assist.speeding)
+                VStack(alignment: .leading) {
+                    Text(T("Warning distance"))
+                    Picker(T("Warning distance"), selection: $m.assist.warnDistance) {
+                        Text(T("Close")).tag(9.0)
+                        Text(T("Normal")).tag(15.0)
+                        Text(T("Far")).tag(24.0)
+                    }.pickerStyle(.segmented)
+                }
                 Picker(T("Speed for warnings"), selection: $m.assist.speedSource) {
                     ForEach(SpeedSource.allCases) { Text($0.label).tag($0) }
                 }

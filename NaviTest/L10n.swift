@@ -171,6 +171,8 @@ enum L10n {
         "U-turn": "otočka",
         "U-turn right": "otočka vpravo",
         "icon %ld": "ikona %ld",
+        "Warning distance": "Vzdálenost upozornění",
+        "Far": "Daleko",
         "Route updated": "Trasa upravena",
         "Route": "Trasa",
         "Start": "Start",

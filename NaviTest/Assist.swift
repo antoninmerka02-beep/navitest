@@ -16,6 +16,7 @@ struct AssistSettings: Codable {
     var tolerance = 5                          // km/h nad limit, než se upozorní
     var speedSource: SpeedSource = .speedometer
     var speedoCorrection = 7                   // o kolik % tachometr ukazuje víc
+    var warnDistance = 15.0                    // sekund dopředu (při dané rychlosti) – blízko/normálně/daleko
     var cameraSound: AlertSound = .laser
     var sectionSound: AlertSound = .radar
     var schoolSound: AlertSound = .chime
@@ -34,6 +35,7 @@ struct AssistSettings: Codable {
         cameras = v(.cameras, d.cameras); schools = v(.schools, d.schools); borders = v(.borders, d.borders)
         speeding = v(.speeding, d.speeding); tolerance = v(.tolerance, d.tolerance)
         speedSource = v(.speedSource, d.speedSource); speedoCorrection = v(.speedoCorrection, d.speedoCorrection)
+        warnDistance = v(.warnDistance, d.warnDistance)
         cameraSound = v(.cameraSound, d.cameraSound); sectionSound = v(.sectionSound, d.sectionSound)
         schoolSound = v(.schoolSound, d.schoolSound); speedingSound = v(.speedingSound, d.speedingSound)
         cameraVoice = v(.cameraVoice, d.cameraVoice); sectionVoice = v(.sectionVoice, d.sectionVoice)
@@ -76,7 +78,9 @@ final class AssistStore {
     private static let servers = ["https://overpass-api.de/api/interpreter",
                                   "https://overpass.private.coffee/api/interpreter",
                                   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-                                  "https://overpass.kumi.systems/api/interpreter"]
+                                  "https://overpass.kumi.systems/api/interpreter",
+                                  "https://overpass.osm.ch/api/interpreter",
+                                  "https://overpass.openstreetmap.ru/api/interpreter"]
     private let lock = NSLock()
     private var mem: [String: AssistCell] = [:]
     private var queue: [String] = []
@@ -84,6 +88,7 @@ final class AssistStore {
     private var failedAt: [String: Date] = [:]
     private var working = false
     private var serverIndex = 0
+    private var serverCoolUntil: [String: Date] = [:]
     private let dir: URL
     var onUpdate: (() -> Void)?
     private var loggedTags = Set<String>()
@@ -182,6 +187,18 @@ final class AssistStore {
         }
     }
 
+    /// Nejbližší server, který v posledních 90 s neselhal (a posune se dál – rovnoměrně je střídá).
+    private func nextServer() -> String {
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        for _ in 0..<AssistStore.servers.count {
+            let s = AssistStore.servers[serverIndex % AssistStore.servers.count]
+            serverIndex += 1
+            if (serverCoolUntil[s] ?? .distantPast) < now { return s }
+        }
+        return AssistStore.servers[serverIndex % AssistStore.servers.count]
+    }
+
     private func query(_ bbox: String) -> [[String: Any]]? {
         let hw = "motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link"
         let q = """
@@ -195,9 +212,7 @@ final class AssistStore {
         );
         out body geom;
         """
-        lock.lock()
-        let server = AssistStore.servers[serverIndex % AssistStore.servers.count]
-        lock.unlock()
+        let server = nextServer()
         guard let url = URL(string: server) else { return nil }
         var req = URLRequest(url: url, timeoutInterval: 30)
         req.httpMethod = "POST"
@@ -223,7 +238,7 @@ final class AssistStore {
         _ = sem.wait(timeout: .now() + 35)
         if result == nil {
             log("⚠️ Overpass \(URL(string: server)?.host ?? server): HTTP \(code) \(errText)")
-            lock.lock(); serverIndex += 1; lock.unlock()       // příště jiný server
+            lock.lock(); serverCoolUntil[server] = Date().addingTimeInterval(code == 429 ? 120 : 60); lock.unlock()
         }
         return result
     }
@@ -334,6 +349,7 @@ final class AssistEngine {
     private var freeSchools: [[Double]] = []
     private var freeLimit = 0
     private var freeRoad = ""
+    private var lastFreeRoadCheck = Date.distantPast
 
     // stav upozornění
     private var warned = Set<String>()
@@ -563,7 +579,7 @@ final class AssistEngine {
         lock.lock(); defer { lock.unlock() }
         var out: [AssistAction] = []
         let v = max(8.0, speed / 3.6)
-        let warnD = max(300.0, v * 15)
+        let warnD = max(200.0, v * st.warnDistance)
         let refresh = Date().timeIntervalSince(lastRefresh) > 3
         if refresh { lastRefresh = Date() }
 
@@ -581,6 +597,7 @@ final class AssistEngine {
             if !warned.contains(key) {
                 warned.insert(key); active[key] = Date()
                 out.append(.dash(msg)); out.append(.sound(kind, lim))
+                log("🚨 Upozornění \(key): \(kind), limit \(lim), vzdálenost \(Int(dist)) m")
             } else if refresh && active[key] != nil {
                 out.append(.dash(msg))
             }
@@ -609,7 +626,9 @@ final class AssistEngine {
         } else if let p = position {
             // ---- Volná jízda: silnice, po které jedu = nejbližší úsek ve směru jízdy
             let me = MKMapPoint(p)
-            if speed > 5 || freeLimit == 0 {
+            let staleFree = Date().timeIntervalSince(lastFreeRoadCheck) > 2
+            if speed > 5 || freeLimit == 0 || staleFree {
+                lastFreeRoadCheck = Date()
                 var bestD = Double.infinity, bestKmh = 0, bestName = ""
                 for w in freeWays {
                     let dx = w.b.x - w.a.x, dy = w.b.y - w.a.y
@@ -625,7 +644,7 @@ final class AssistEngine {
                     bestD = d; bestKmh = w.kmh; bestName = w.name
                 }
                 if bestKmh > 0 { freeLimit = bestKmh; freeRoad = bestName }
-                else if speed > 5 { freeLimit = 0; freeRoad = "" }
+                else if speed > 5 || staleFree { freeLimit = 0; freeRoad = "" }
             }
             limitNow = freeLimit
             // Radary a školy před námi (v kuželu ±25° ve směru jízdy)
@@ -638,13 +657,29 @@ final class AssistEngine {
                 return (diff < 25 && d * sin(diff * .pi / 180) < 40) ? d : nil
             }
             if st.cameras {
+                // Kandidáti před námi, seřazení podle vzdálenosti; blízké dvojice (do 150 m) sloučit do jedné
+                struct Ahead { let d: Double; let cam: AssistCell.Cam }
+                var ahd: [Ahead] = []
                 for cam in freeCams {
                     if let dir = cam.dir, AssistEngine.angleDiff(dir, heading) > 100 { continue }
                     guard let d = ahead(cam.lat, cam.lon) else { continue }
-                    let key = String(format: "f%.5f,%.5f", cam.lat, cam.lon)
-                    let type: UInt8 = cam.red ? 5 : (cam.avg ? 3 : 0)
-                    let lim = cam.limit > 0 ? cam.limit : freeLimit
-                    approach(key, d, -30, camMsg(lim, d, type), NL.speedCameraClear(),
+                    ahd.append(Ahead(d: d, cam: cam))
+                }
+                ahd.sort { $0.d < $1.d }
+                var lastKeptD = -1000.0
+                var lastKeptKey = ""
+                for h in ahd {
+                    let key = String(format: "f%.5f,%.5f", h.cam.lat, h.cam.lon)
+                    if h.d - lastKeptD < 150 && h.d >= 0 {
+                        // stejná dvojice jako poslední ponechaná – jen ji „přepínáme“ na bližší souřadnici,
+                        // ale nezakládáme nové upozornění
+                        if active[lastKeptKey] != nil { active[key] = active[lastKeptKey] }
+                        continue
+                    }
+                    lastKeptD = h.d; lastKeptKey = key
+                    let type: UInt8 = h.cam.red ? 5 : (h.cam.avg ? 3 : 0)
+                    let lim = h.cam.limit > 0 ? h.cam.limit : freeLimit
+                    approach(key, h.d, -30, camMsg(lim, h.d, type), NL.speedCameraClear(),
                              type == 5 ? .redLight : (type == 3 ? .section : .camera), lim, warnD)
                 }
                 for s in freeSecs {
@@ -674,8 +709,9 @@ final class AssistEngine {
                 out.append(.sound(.speeding, limitNow))
                 let bikeText = bikeKmh >= 0 ? String(format: "%.0f km/h", bikeKmh) : "–"
                 let src = st.speedSource == .speedometer ? "tachometr +\(st.speedoCorrection) %" : "skutečná"
-                log(String(format: "🚨 Rychlost: motorka %@, GPS %.0f km/h, pro upozornění %.0f (%@), limit %ld + tolerance %ld",
-                           bikeText, gpsKmh, eff, src, limitNow, st.tolerance))
+                log(String(format: "🚨 Rychlost: motorka %@, GPS %.0f km/h, pro upozornění %.0f (%@), limit %ld + tolerance %ld, poloha %@",
+                           bikeText, gpsKmh, eff, src, limitNow, st.tolerance,
+                           position.map { String(format: "%.5f,%.5f", $0.latitude, $0.longitude) } ?? "?"))
             } else if eff < threshold - 3 {
                 speedingActive = false
             }

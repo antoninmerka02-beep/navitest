@@ -161,9 +161,10 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
 
         // Vzdálenosti podle rychlosti (m/s; ve stoje ~30 km/h): při 50 km/h ~220 m, ~110 m a ~40 m
         let v = max(8.0, speed)
-        let atD = min(90.0, max(25.0, v * 3))
-        let nearD = min(400.0, max(100.0, v * 8))
-        let farD = min(1000.0, max(220.0, v * 16))
+        // „Nyní odbočte“ s dostatečným předstihem na reakci (~2 s dopředu), první hlášení 300–500 m
+        let atD = min(90.0, max(15.0, v * 2.0))
+        let nearD = min(400.0, max(150.0, v * 10))
+        let farD = min(1000.0, max(300.0, v * 20))
         // Málo: předem + u křižovatky; Normálně/Hodně: dvakrát předem + u křižovatky
         let tiers: [Double] = settings.frequency == .low ? [farD] : [farD, nearD]
         let d = s.toNext
@@ -252,7 +253,9 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
         case .redLight: return cs ? "Kamera na červenou." : "Red light camera."
         case .section: return cs ? "Úsekové měření\(l)." : "Average speed check\(l)."
         case .school: return cs ? "Školní zóna." : "School zone."
-        case .speeding: return cs ? "Pozor, rychlost." : "Watch your speed."
+        case .speeding:
+            let lim = limit > 0 ? " \(speedValue(kmh: limit).0)" : ""
+            return cs ? "Pozor, rychlost, limit\(lim)." : "Watch your speed, limit\(lim)."
         }
     }
 
