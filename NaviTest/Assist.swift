@@ -580,6 +580,9 @@ final class AssistEngine {
         var out: [AssistAction] = []
         let v = max(8.0, speed / 3.6)
         let warnD = max(200.0, v * st.warnDistance)
+        // Po trase je poloha radaru z předstažených dat jistá, takže je bezpečné upozornit dřív
+        // (radar může vyžadovat brzdění, ne jen odbočení).
+        let routeWarnD = along != nil ? warnD * 1.6 : warnD
         let refresh = Date().timeIntervalSince(lastRefresh) > 3
         if refresh { lastRefresh = Date() }
 
@@ -610,10 +613,10 @@ final class AssistEngine {
                 for (i, c) in data.cameras.enumerated() {
                     let lim = c.limit > 0 ? c.limit : routeLimitLocked(c.at)
                     approach("c\(i)", c.at - a, -30, camMsg(lim, c.at - a, c.type), NL.speedCameraClear(),
-                             c.type == 5 ? .redLight : (c.type == 3 ? .section : .camera), lim, warnD)
+                             c.type == 5 ? .redLight : (c.type == 3 ? .section : .camera), lim, routeWarnD)
                 }
                 for (i, s) in data.sections.enumerated() {
-                    approach("s\(i)", s.from - a, -80, camMsg(s.limit, s.from - a, 3), NL.speedCameraClear(), .section, s.limit, warnD)
+                    approach("s\(i)", s.from - a, -80, camMsg(s.limit, s.from - a, 3), NL.speedCameraClear(), .section, s.limit, routeWarnD)
                 }
             }
             if st.schools {

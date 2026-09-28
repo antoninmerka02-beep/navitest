@@ -1,18 +1,18 @@
-# NaviTest R9 – version 1.1
-
-Rider assistance
-- Every alert now logs the triggering coordinate (or speeding) for diagnosing unexpected beeps.
-- Nearby duplicate cameras (within 150 m) merged in free drive too, not just on a route.
-- More Overpass mirrors, with a per-server cooldown after a failure so a struggling server is skipped
-  for a while instead of being retried immediately.
-- Free-drive speed limit refreshes faster when it changes (a stale check no longer waits for movement).
-- Speeding voice alert now names the limit ("Watch your speed, limit 50").
-- New "Warning distance" setting for cameras/sections/schools: Close / Normal / Far.
-- Cameras, section control, red light cameras and school zones now show as pins on the phone map too
-  (not just the bike map).
+# NaviTest R9 – version 1.2
 
 Voice guidance
-- Retuned junction timing: first announcement 300–500 m ahead depending on speed, "now" with a safe
-  ~2-second lead (about 20–30 m in town, further at higher speed). Roundabouts unchanged.
+- "Turn now" now arrives with a real safety margin: at least 40 m even at low speed (~2.5–3 s of
+  travel), so it lands before the turn instead of during or after it.
+
+Rider assistance
+- Known route: camera/section warnings get 60% more lead than in free drive, since the position is
+  certain from the pre-fetched data ahead of time (braking may be needed, not just steering).
+- When OpenStreetMap doesn't distinguish a fixed camera from an unlinked average-speed-section point
+  (common in Czechia), the spoken alert now says "Speed check" instead of guessing "Radar" — the tone
+  and dashboard icon are unchanged, only the uncertain voice wording.
+
+Not changed this version: the dashboard's left-column panel disappearing after switching to
+Turn-by-Turn and back. This session's log shows no Turn-by-Turn content request at all, so nothing
+pointed to a specific cause — see the chat for what to capture next time it happens.
 
 Map data © OpenStreetMap contributors, OpenFreeMap, © OpenMapTiles.

@@ -161,8 +161,9 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
 
         // Vzdálenosti podle rychlosti (m/s; ve stoje ~30 km/h): při 50 km/h ~220 m, ~110 m a ~40 m
         let v = max(8.0, speed)
-        // „Nyní odbočte“ s dostatečným předstihem na reakci (~2 s dopředu), první hlášení 300–500 m
-        let atD = min(90.0, max(15.0, v * 2.0))
+        // „Nyní odbočte“ musí přijít s předstihem na GPS, TTS i reakci řidiče –
+        // aspoň 40 m i při nízké rychlosti, jinak zazní až v zatáčce nebo po ní.
+        let atD = min(110.0, max(40.0, v * 2.5))
         let nearD = min(400.0, max(150.0, v * 10))
         let farD = min(1000.0, max(300.0, v * 20))
         // Málo: předem + u křižovatky; Normálně/Hodně: dvakrát předem + u křižovatky
@@ -246,10 +247,12 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
         }
     }
 
+    /// U izolovaného bodu bez podpůrné informace o typu appka neví jistě, jestli jde o radar,
+    /// nebo o (v Česku běžné) úsekové měření bez propojovací vazby v datech – proto neutrální hláška.
     private func alertText(_ k: AlertKind, limit: Int) -> String {
         let l = limit > 0 ? ", \(speedValue(kmh: limit).0)" : ""
         switch k {
-        case .camera: return cs ? "Radar\(l)." : "Speed camera\(l)."
+        case .camera: return cs ? "Měření rychlosti\(l)." : "Speed check\(l)."
         case .redLight: return cs ? "Kamera na červenou." : "Red light camera."
         case .section: return cs ? "Úsekové měření\(l)." : "Average speed check\(l)."
         case .school: return cs ? "Školní zóna." : "School zone."
