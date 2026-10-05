@@ -10,7 +10,12 @@ final class PlacePin: MKPointAnnotation {
 /// Špendlík radaru / úsekového měření / kamery na červenou / školní zóny.
 final class AssistPin: MKPointAnnotation {
     var kind: AlertKind = .camera
+    var limit = 0
+    var line: [CLLocationCoordinate2D] = []
 }
+
+/// Červená čára úsekového měření.
+final class SectionLine: MKPolyline {}
 
 struct PhoneMapView: UIViewRepresentable {
     @ObservedObject var model: AppModel
@@ -93,9 +98,20 @@ struct PhoneMapView: UIViewRepresentable {
                 let a = AssistPin()
                 a.coordinate = poi.coordinate
                 a.kind = poi.kind
+                a.limit = poi.limit
+                a.line = poi.line
                 return a
             }
             v.addAnnotations(c.assistPins)
+        }
+        if c.assistInfoId != model.assistInfo?.id {
+            c.assistInfoId = model.assistInfo?.id
+            if let old = c.sectionLine { v.removeOverlay(old); c.sectionLine = nil }
+            if let info = model.assistInfo, info.line.count >= 2 {
+                let l = SectionLine(coordinates: info.line, count: info.line.count)
+                v.addOverlay(l)
+                c.sectionLine = l
+            }
         }
         if c.recenter != model.recenterToken {
             c.recenter = model.recenterToken
@@ -115,6 +131,8 @@ struct PhoneMapView: UIViewRepresentable {
         var resultIds: [UUID] = []
         var assistPins: [AssistPin] = []
         var assistTick = 0
+        var assistInfoId: UUID? = nil
+        var sectionLine: SectionLine?
 
         init(model: AppModel) { self.model = model }
 
@@ -142,6 +160,12 @@ struct PhoneMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let l = overlay as? SectionLine {
+                let r = MKPolylineRenderer(polyline: l)
+                r.strokeColor = UIColor(red: 0.95, green: 0.15, blue: 0.15, alpha: 0.9)
+                r.lineWidth = 7
+                return r
+            }
             if let l = overlay as? MKPolyline {
                 let r = MKPolylineRenderer(polyline: l)
                 r.strokeColor = UIColor(red: 0.0, green: 0.72, blue: 0.9, alpha: 1)
@@ -154,6 +178,9 @@ struct PhoneMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, didSelect annotation: MKAnnotation) {
             if let pin = annotation as? PlacePin, let p = pin.place {
                 model.selectedPlace = p
+            } else if let a = annotation as? AssistPin {
+                model.selectAssist(kind: a.kind, limit: a.limit, coordinate: a.coordinate, line: a.line)
+                mapView.deselectAnnotation(annotation, animated: false)
             } else if let feature = annotation as? MKMapFeatureAnnotation {
                 MKMapItemRequest(mapFeatureAnnotation: feature).getMapItem { [weak self] item, _ in
                     guard let self = self, let item = item else { return }
@@ -368,7 +395,9 @@ struct MainView: View {
 
     private var bottomArea: some View {
         VStack(spacing: 8) {
-            if let p = m.selectedPlace {
+            if let info = m.assistInfo {
+                AssistInfoCard(info: info)
+            } else if let p = m.selectedPlace {
                 PlaceCard(place: p)
             } else if m.isPreviewing {
                 PreviewPanel()
@@ -449,6 +478,34 @@ struct PlaceCard: View {
         .sheet(isPresented: $editFavorite) {
             NavigationStack { FavoriteEditorView(place: place) }.environmentObject(m)
         }
+    }
+}
+
+// MARK: - Vysvětlivka k radaru / úseku / škole
+struct AssistInfoCard: View {
+    @EnvironmentObject var m: AppModel
+    let info: AssistInfo
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: info.symbol).font(.title2).frame(width: 34)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(info.title).font(.headline)
+                if info.limit > 0 {
+                    let (v, u) = speedValue(kmh: info.limit)
+                    Text(TF("Speed limit %ld %@", v, u)).font(.subheadline)
+                }
+                if !info.address.isEmpty { Text(info.address).font(.subheadline).foregroundStyle(.secondary) }
+                if info.kind == .section && info.line.count >= 2 {
+                    Text(T("The measured section is shown in red on the map.")).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button { m.assistInfo = nil } label: {
+                Image(systemName: "xmark.circle.fill").font(.title2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -1185,6 +1242,9 @@ struct DiagnosticsView: View {
                 }.pickerStyle(.segmented)
                 Toggle(T("Send images"), isOn: $m.opts.sendImages)
                 Toggle(T("Send navigation data"), isOn: $m.opts.sendNavData)
+                Picker(T("After Change View"), selection: $m.opts.changeViewMode) {
+                    ForEach(ChangeViewMode.allCases) { Text($0.label).tag($0) }
+                }
                 Picker(T("Turn message"), selection: $m.opts.navService) {
                     ForEach(NavServiceChoice.allCases) { Text($0.label).tag($0) }
                 }.pickerStyle(.segmented)

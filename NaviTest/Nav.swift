@@ -106,6 +106,7 @@ struct NavSnapshot {
     var maneuverPoint: CLLocationCoordinate2D? = nil
     var destination: CLLocationCoordinate2D? = nil
     var along: Double = 0                // metry od začátku trasy
+    var uTurn = false                    // trasa začíná za námi – nejdřív se otočit
     var waypoints: [CLLocationCoordinate2D] = []   // zbývající průjezdní body (špendlíky)
 }
 

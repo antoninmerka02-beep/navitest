@@ -130,21 +130,34 @@ final class VoiceGuide: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDele
         synth.stopSpeaking(at: .immediate)
     }
 
-    /// Nová trasa / přepočet.
-    func routeStarted(generation: Int, reroute: Bool) {
+    private var lastRerouteSpoken = Date.distantPast
+    private var lastUTurnSpoken = Date.distantPast
+
+    /// Nová trasa / přepočet. `uTurn` = trasa začíná za námi.
+    func routeStarted(generation: Int, reroute: Bool, uTurn: Bool = false) {
         guard generation != routeGen else { return }
         routeGen = generation
         maneuverKey = ""
         spokenLevel = 0
         arrivedSpoken = false
         mentionedNextKey = ""
-        if reroute { say(cs ? "Přepočítávám trasu." : "Recalculating.") }
+        guard settings.enabled else { return }
+        if uTurn {
+            if Date().timeIntervalSince(lastUTurnSpoken) > 40 {
+                lastUTurnSpoken = Date()
+                say(cs ? "Otočte se, až to bude bezpečné." : "Make a U-turn when it is safe.")
+            }
+        } else if reroute && Date().timeIntervalSince(lastRerouteSpoken) > 30 {
+            lastRerouteSpoken = Date()
+            say(cs ? "Přepočítávám trasu." : "Recalculating.")
+        }
     }
 
     private var pendingExit: Double? = nil      // kde říct „Nyní vyjeďte“ (jen četnost Hodně)
 
     func update(_ s: NavSnapshot, speed: Double) {
         guard settings.enabled, s.guiding else { return }
+        if s.uTurn { return }                        // nejdřív otočit, ostatní pokyny by mátly
         // „Nyní vyjeďte“ u výjezdu z kruháče (jen Hodně)
         if let ex = pendingExit {
             if s.along >= ex - 12 {

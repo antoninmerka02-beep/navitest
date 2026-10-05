@@ -32,7 +32,7 @@
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Spojení s přístrojovkou motorky.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Poloha drží aplikaci běžící na pozadí, aby mohla posílat navigaci do motorky.</string>
+	<string>NaviTest needs your location for navigation on the bike dashboard, also when the iPhone starts the app on its own after the bike connects (phone locked in your pocket). / NaviTest potřebuje polohu pro navigaci na přístrojovce, i když appku po připojení motorky spustí iPhone sám (telefon zamčený v kapse).</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Poloha drží aplikaci běžící na pozadí, aby mohla posílat navigaci do motorky.</string>
 	<key>NSMicrophoneUsageDescription</key>

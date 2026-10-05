@@ -23,6 +23,19 @@ enum NavServiceChoice: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// Co poslat přístrojovce, když se vrátí na mapu přes „Change View → Default View“ (test variant).
+enum ChangeViewMode: String, CaseIterable, Identifiable, Codable {
+    case full, doneOnly, none
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .full: return T("Full route start")
+        case .doneOnly: return T("Only “done”")
+        case .none: return T("Nothing")
+        }
+    }
+}
+
 enum NavSource: String, CaseIterable, Identifiable, Codable {
     case sim, real
     var id: String { rawValue }
@@ -44,6 +57,7 @@ struct TestOptions: Codable {
     var tileURL: String = ""          // prázdné = OpenFreeMap
     var threeD = false                // 3D (nakloněný) pohled
     var autoZoom = true               // oddálit mapu s rychlostí
+    var changeViewMode: ChangeViewMode = .full   // co poslat po návratu z „Change View“
     var streetNames = true            // názvy ulic podél silnic
 
     init() {}
@@ -66,6 +80,7 @@ struct TestOptions: Codable {
         tileURL = (try? c.decodeIfPresent(String.self, forKey: .tileURL)) ?? d.tileURL
         threeD = (try? c.decodeIfPresent(Bool.self, forKey: .threeD)) ?? d.threeD
         autoZoom = (try? c.decodeIfPresent(Bool.self, forKey: .autoZoom)) ?? d.autoZoom
+        changeViewMode = (try? c.decodeIfPresent(ChangeViewMode.self, forKey: .changeViewMode)) ?? d.changeViewMode
         streetNames = (try? c.decodeIfPresent(Bool.self, forKey: .streetNames)) ?? d.streetNames
     }
 }
@@ -163,6 +178,8 @@ final class DashSession {
     private var lastGuiding: Bool? = nil
     private var lastLoggedSource: MapSource? = nil
     private var lastRouteGen = -1
+    private var dashRequestedContent = false   // přístrojovka si opravdu řekla o mapu / seznam odboček
+    private var stopsInRow = 0                 // STOPy mapy za sebou (≥ 2 = návrat přes Change View)
     private var lastViaCount = -1
 
     /// metrů na pixel pro jednotlivé úrovně zoomu (0,25 = nejblíž, 160 = nejdál)
@@ -245,6 +262,8 @@ final class DashSession {
         lastGuiding = nil
         lastLoggedSource = nil
         lastRouteGen = -1
+        dashRequestedContent = false
+        stopsInRow = 0
         defer {
             link.close()
             setRunning(false)
@@ -368,7 +387,7 @@ final class DashSession {
                 // Nová trasa (nebo přepočet, nebo nové připojení během navigace) → start trasy jako Garmin
                 if let n = nav, n.guiding {
                     let gen = o.navSource == .real ? navigator.routeGeneration : -2   // simulace = jedna „trasa“
-                    if gen != lastRouteGen && (mode == .map || mode == .tbt) {
+                    if gen != lastRouteGen && dashRequestedContent && (mode == .map || mode == .tbt) {
                         lastRouteGen = gen
                         sendRouteStart()
                         tbtListStart = -1          // po startu trasy hned nový seznam odboček
@@ -501,18 +520,41 @@ final class DashSession {
             let ct = f.payload.first ?? 0
             log("⬅️ Motorka žádá START obsahu: \(NL.contentName(ct)) [\(f.payload.hex)]")
             if ct == 1 {
+                let firstRequest = !dashRequestedContent
+                let afterChangeView = stopsInRow >= 2
+                stopsInRow = 0
+                dashRequestedContent = true
                 mode = .map
                 send(NL.flag(2, lastGuiding ?? false)); send(NL.flag(13, true)); send(NL.flag(12, true))
                 send(zoomMessage(show: false))
                 send(NL.dayNight(night ? 2 : 1))
-                if lastGuiding == true {
-                    // jako Garmin: žádná nová startovací sekvence, jen aktuální stav
-                    send(NL.flag(2, true))
+                if lastGuiding == true && !firstRequest {
+                    if afterChangeView {
+                        // „Change View → Default View“: přístrojovka si navigační obrazovku sestavuje znovu
+                        switch options.changeViewMode {
+                        case .full:
+                            lastRouteGen = -1           // celý start trasy při nejbližším kroku smyčky
+                            log("↩️ Návrat na mapu po Change View → posílám celý start trasy")
+                        case .doneOnly:
+                            send(NL.routeCalcProgress(-1)); send(NL.flag(2, true))
+                            send(NL.viaCount(navigator.remainingVias()))
+                            log("↩️ Návrat na mapu po Change View → posílám jen „hotovo“ + naviguji")
+                        case .none:
+                            send(NL.flag(2, true))
+                            log("↩️ Návrat na mapu po Change View → nic navíc")
+                        }
+                    } else {
+                        // běžný návrat (z menu): jako Garmin, jen aktuální stav
+                        send(NL.flag(2, true))
+                        log("↩️ Běžný návrat na mapu → jen aktuální stav")
+                    }
                     tbtListStart = -1
                     tbtLastActive = -1
                     lastViaCount = -1
                 }
             } else if ct == 2 {
+                dashRequestedContent = true
+                stopsInRow = 0
                 mode = .tbt
                 if lastGuiding == true { send(NL.flag(2, true)); tbtListStart = -1; tbtLastActive = -1 }
                 tbtListStart = -1
@@ -527,6 +569,7 @@ final class DashSession {
         case 56:
             let ct = f.payload.first ?? 0
             log("⬅️ Motorka žádá STOP obsahu: \(NL.contentName(ct)) [\(f.payload.hex)]")
+            if ct == 1 { stopsInRow += 1 }
             if ct == 1 && mode == .map { send(NL.imageStopped()); mode = .none }
             if ct == 2 && mode == .tbt { mode = .none }
             publish()

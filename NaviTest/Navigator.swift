@@ -341,6 +341,10 @@ final class Navigator {
     /// Nastavení navigace: automatický přepočet a vzdálenost pro „sjetí z trasy“.
     var autoReroute = true
     var offRouteMeters: Double = 40
+    /// Trasa začíná opačným směrem, než jedeme – dokud se jezdec neotočí, ukazujeme „otočte se“.
+    private var uTurnPending = false
+    func setUTurn(_ on: Bool) { lock.lock(); uTurnPending = on; lock.unlock() }
+    var isUTurnPending: Bool { lock.lock(); defer { lock.unlock() }; return uTurnPending }
     private var lastLocation: CLLocation?
     private var fixTime = Date.distantPast
     private var heading: Double = 0
@@ -364,7 +368,7 @@ final class Navigator {
     func setRoute(_ r: NavRoute?) {
         lock.lock(); defer { lock.unlock() }
         route = r
-        if r != nil { _generation += 1 }
+        if r != nil { _generation += 1 } else { uTurnPending = false }
         matchedSeg = 0; along = 0; offCount = 0; arrivedAt = nil; matchDist = .infinity
         if let loc = lastLocation, r != nil {
             let m = match(loc, full: true)
@@ -388,7 +392,15 @@ final class Navigator {
 
         let threshold = max(offRouteMeters, loc.horizontalAccuracy * 1.5)
         if m.dist > threshold && loc.horizontalAccuracy > 0 && loc.horizontalAccuracy < 60 { offCount += 1 } else { offCount = 0 }
-        if autoReroute && offCount >= 3 && Date().timeIntervalSince(lastReroute) > 15 && arrivedAt == nil {
+        // Otočil se už jezdec? (jede ve směru trasy a je na ní)
+        if uTurnPending && loc.speed > 2 && loc.course >= 0 {
+            var d = abs(loc.course - r.bearing(at: along)).truncatingRemainder(dividingBy: 360)
+            if d > 180 { d = 360 - d }
+            if d < 60 && m.dist < 30 { uTurnPending = false }
+        }
+        // Při čekání na otočení přepočítávat méně často (jinak každých 15 s „Přepočítávám“)
+        let rerouteGap: TimeInterval = uTurnPending ? 45 : 15
+        if autoReroute && offCount >= 3 && Date().timeIntervalSince(lastReroute) > rerouteGap && arrivedAt == nil {
             lastReroute = Date()
             offCount = 0
             let cb = onReroute
@@ -504,6 +516,11 @@ final class Navigator {
         s.maneuverPoint = m.coordinate
         s.destination = r.points.last?.coordinate
         s.along = a
+        if uTurnPending {
+            s.uTurn = true
+            s.icon = TurnIcon.uturnL
+            s.text = T("Make a U-turn when possible")
+        }
         s.waypoints = r.vias.filter { $0.at > a + 10 }.map { $0.coordinate }
         if let f = limitAt { s.speedLimit = Float(f(a)) }
         if arrivedAt != nil {

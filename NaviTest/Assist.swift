@@ -57,6 +57,8 @@ enum AssistAction {
 struct AssistPOI {
     let coordinate: CLLocationCoordinate2D
     let kind: AlertKind
+    var limit: Int = 0
+    var line: [CLLocationCoordinate2D] = []    // u úsekového měření průběh úseku
 }
 
 // MARK: - Data jedné buňky (~3,3 × 3,3 km)
@@ -65,6 +67,7 @@ struct AssistCell: Codable {
     struct Sec: Codable { let fLat: Double; let fLon: Double; let tLat: Double; let tLon: Double; let limit: Int }
     struct Way: Codable { let pts: [[Double]]; let kmh: Int; let name: String; let oneway: Bool }
     var fetched: Date
+    var waysOK: Bool? = nil          // false = limity se ještě nepodařilo stáhnout (radary už ano)
     var cams: [Cam] = []
     var secs: [Sec] = []
     var schools: [[Double]] = []
@@ -138,7 +141,7 @@ final class AssistStore {
 
     private func fresh(_ k: String) -> Bool {
         guard let c = cell(k) else { return false }
-        return Date().timeIntervalSince(c.fetched) < 7 * 86_400
+        return Date().timeIntervalSince(c.fetched) < 7 * 86_400 && c.waysOK != false
     }
 
     /// Zařadí buňky ke stažení (co je čerstvé v mezipaměti, přeskočí).
@@ -168,22 +171,43 @@ final class AssistStore {
             guard parts.count == 2 else { continue }
             let s = Double(parts[0]) * AssistStore.latStep, w = Double(parts[1]) * AssistStore.lonStep
             let bbox = String(format: "%.5f,%.5f,%.5f,%.5f", s, w, s + AssistStore.latStep, w + AssistStore.lonStep)
-            var ok = false
-            for attempt in 0..<4 {
-                if let els = query(bbox) {
-                    let c = build(els)
-                    lock.lock(); mem[k] = c; lock.unlock()
-                    if let d = try? JSONEncoder().encode(c) { try? d.write(to: dir.appendingPathComponent("\(k).json"), options: .atomic) }
-                    ok = true
-                    break
+            // 1) lehký dotaz: radary, úseková měření, školy – malý, projde skoro vždy
+            var cur = self.cell(k)
+            let needLight = cur == nil || Date().timeIntervalSince(cur!.fetched) >= 7 * 86_400
+            if needLight {
+                var got: AssistCell? = nil
+                for attempt in 0..<3 {
+                    if let els = query(bbox, heavy: false) { got = build(els); break }
+                    Thread.sleep(forTimeInterval: attempt < 1 ? 2 : 5)
                 }
-                Thread.sleep(forTimeInterval: attempt < 2 ? 2 : 6)
+                if var c = got {
+                    c.waysOK = false
+                    save(k, c)
+                    cur = c
+                    onUpdate?()
+                }
+            }
+            // 2) těžší dotaz: rychlostní limity (silnice s maxspeed) – smí přijít později
+            var ok = false
+            if var c = cur {
+                for attempt in 0..<3 {
+                    if let els = query(bbox, heavy: true) {
+                        c.ways = build(els).ways
+                        c.waysOK = true
+                        save(k, c)
+                        ok = true
+                        break
+                    }
+                    Thread.sleep(forTimeInterval: attempt < 1 ? 3 : 8)
+                }
             }
             lock.lock()
             queued.remove(k)
             if !ok { failedAt[k] = Date() }
             lock.unlock()
-            if ok { onUpdate?() } else { log("⚠️ Asistence: buňku \(k) se nepodařilo stáhnout, zkusím později") }
+            if ok { onUpdate?() }
+            else if cur != nil { log("⚠️ Asistence: buňka \(k) – radary ano, limity zatím ne, zkusím později") }
+            else { log("⚠️ Asistence: buňku \(k) se nepodařilo stáhnout, zkusím později") }
         }
     }
 
@@ -199,22 +223,30 @@ final class AssistStore {
         return AssistStore.servers[serverIndex % AssistStore.servers.count]
     }
 
-    private func query(_ bbox: String) -> [[String: Any]]? {
+    private func save(_ k: String, _ c: AssistCell) {
+        lock.lock(); mem[k] = c; lock.unlock()
+        if let d = try? JSONEncoder().encode(c) { try? d.write(to: dir.appendingPathComponent("\(k).json"), options: .atomic) }
+    }
+
+    private func query(_ bbox: String, heavy: Bool) -> [[String: Any]]? {
         let hw = "motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link"
-        let q = """
-        [out:json][timeout:25];
+        let q = heavy ? """
+        [out:json][timeout:40];
+        way["highway"~"^(\(hw))$"]["maxspeed"](\(bbox));
+        out body geom;
+        """ : """
+        [out:json][timeout:20];
         (
           node["highway"="speed_camera"](\(bbox));
           relation["type"="enforcement"](\(bbox));
           node["hazard"="school_zone"](\(bbox));
           way["hazard"="school_zone"](\(bbox));
-          way["highway"~"^(\(hw))$"]["maxspeed"](\(bbox));
         );
         out body geom;
         """
         let server = nextServer()
         guard let url = URL(string: server) else { return nil }
-        var req = URLRequest(url: url, timeoutInterval: 30)
+        var req = URLRequest(url: url, timeoutInterval: heavy ? 45 : 25)
         req.httpMethod = "POST"
         req.setValue("NaviTest-R9/1.0 (iOS; hobby motorcycle navigation)", forHTTPHeaderField: "User-Agent")
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -235,7 +267,7 @@ final class AssistStore {
             errText = err?.localizedDescription ?? ""
             sem.signal()
         }.resume()
-        _ = sem.wait(timeout: .now() + 35)
+        _ = sem.wait(timeout: .now() + (heavy ? 50 : 30))
         if result == nil {
             log("⚠️ Overpass \(URL(string: server)?.host ?? server): HTTP \(code) \(errText)")
             lock.lock(); serverCoolUntil[server] = Date().addingTimeInterval(code == 429 ? 120 : 60); lock.unlock()
@@ -722,19 +754,42 @@ final class AssistEngine {
         return out
     }
 
-    /// Body pro mapu v motorce.
+    /// Body pro mapu v motorce i v telefonu.
     func mapPOIs() -> [AssistPOI] {
         lock.lock(); defer { lock.unlock() }
         if !routePts.isEmpty {
-            var out = data.cameras.map { AssistPOI(coordinate: $0.coordinate, kind: $0.type == 5 ? .redLight : ($0.type == 3 ? .section : .camera)) }
-            out += data.sections.map { AssistPOI(coordinate: $0.coordinate, kind: .section) }
+            var out = data.cameras.map { c -> AssistPOI in
+                AssistPOI(coordinate: c.coordinate, kind: c.type == 5 ? .redLight : (c.type == 3 ? .section : .camera),
+                          limit: c.limit > 0 ? c.limit : routeLimitLocked(c.at))
+            }
+            out += data.sections.map { s in
+                AssistPOI(coordinate: s.coordinate, kind: .section, limit: s.limit, line: routeCoords(from: s.from, to: s.to))
+            }
             out += data.schools.map { AssistPOI(coordinate: $0.coordinate, kind: .school) }
             return out
         }
-        var out = freeCams.map { AssistPOI(coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
-                                           kind: $0.red ? .redLight : ($0.avg ? .section : .camera)) }
-        out += freeSecs.map { AssistPOI(coordinate: CLLocationCoordinate2D(latitude: $0.fLat, longitude: $0.fLon), kind: .section) }
+        var out = freeCams.map { c -> AssistPOI in
+            AssistPOI(coordinate: CLLocationCoordinate2D(latitude: c.lat, longitude: c.lon),
+                      kind: c.red ? .redLight : (c.avg ? .section : .camera), limit: c.limit)
+        }
+        out += freeSecs.map { s in
+            AssistPOI(coordinate: CLLocationCoordinate2D(latitude: s.fLat, longitude: s.fLon), kind: .section, limit: s.limit,
+                      line: [CLLocationCoordinate2D(latitude: s.fLat, longitude: s.fLon),
+                             CLLocationCoordinate2D(latitude: s.tLat, longitude: s.tLon)])
+        }
         out += freeSchools.map { AssistPOI(coordinate: CLLocationCoordinate2D(latitude: $0[0], longitude: $0[1]), kind: .school) }
+        return out
+    }
+
+    /// Body trasy mezi dvěma vzdálenostmi (pro červenou čáru úsekového měření).
+    private func routeCoords(from a: Double, to b: Double) -> [CLLocationCoordinate2D] {
+        guard routePts.count > 1, b > a else { return [] }
+        var out: [CLLocationCoordinate2D] = []
+        for i in 0..<routePts.count where routeCum[i] >= a && routeCum[i] <= b { out.append(routePts[i].coordinate) }
+        if out.count < 2 {
+            out = [NavRoute.pointAt(points: routePts, cum: routeCum, d: a).coordinate,
+                   NavRoute.pointAt(points: routePts, cum: routeCum, d: b).coordinate]
+        }
         return out
     }
 }

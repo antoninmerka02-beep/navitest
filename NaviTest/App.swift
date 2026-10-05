@@ -19,7 +19,11 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         lm.activityType = .automotiveNavigation
         lm.allowsBackgroundLocationUpdates = true
         lm.showsBackgroundLocationIndicator = true
-        if lm.authorizationStatus == .notDetermined { lm.requestWhenInUseAuthorization() }
+        // „Vždy“: když iPhone appku spustí sám po připojení motorky (na pozadí), „Při používání“ polohu nepustí
+        switch lm.authorizationStatus {
+        case .notDetermined, .authorizedWhenInUse: lm.requestAlwaysAuthorization()
+        default: break
+        }
         lm.startUpdatingLocation()
         log("GPS zapnuto (oprávnění: \(lm.authorizationStatus.rawValue))")
     }
@@ -93,6 +97,34 @@ struct SavedSettings: Codable {
     }
 }
 
+/// Vysvětlivka k bodu asistence (karta v mapě telefonu).
+struct AssistInfo: Identifiable {
+    let id = UUID()
+    let kind: AlertKind
+    let limit: Int
+    let coordinate: CLLocationCoordinate2D
+    let line: [CLLocationCoordinate2D]
+    var address = ""
+
+    var title: String {
+        switch kind {
+        case .camera: return T("Speed check")
+        case .section: return T("Section control")
+        case .redLight: return T("Red light camera")
+        case .school: return T("School zone")
+        case .speeding: return T("Speeding")
+        }
+    }
+    var symbol: String {
+        switch kind {
+        case .camera, .section: return "camera.fill"
+        case .redLight: return "traffic.light.fill"
+        case .school: return "figure.child"
+        case .speeding: return "gauge.with.needle"
+        }
+    }
+}
+
 // MARK: - Model aplikace
 final class AppModel: ObservableObject {
     // Stav a nastavení
@@ -136,6 +168,7 @@ final class AppModel: ObservableObject {
     @Published var recenterToken = 0
     @Published var toast: String? = nil
     @Published var searchResults: [Place] = []
+    @Published var assistInfo: AssistInfo? = nil
     @Published var searchingNearby = false
     @Published var phoneNight = false
 
@@ -380,6 +413,18 @@ final class AppModel: ObservableObject {
         voice.playAlert(snd, voice: voiceOn, kind: kind, limit: limit, volume: a.alertVolume)
     }
 
+    // MARK: Vysvětlivka k radaru / úseku / škole v mapě telefonu
+    func selectAssist(kind: AlertKind, limit: Int, coordinate: CLLocationCoordinate2D, line: [CLLocationCoordinate2D]) {
+        selectedPlace = nil
+        let info = AssistInfo(kind: kind, limit: limit, coordinate: coordinate, line: line)
+        assistInfo = info
+        CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)) { [weak self] pms, _ in
+            guard let self = self, self.assistInfo?.id == info.id, let pm = pms?.first else { return }
+            let street = [pm.thoroughfare, pm.subThoroughfare].compactMap { $0 }.joined(separator: " ")
+            self.assistInfo?.address = [street.isEmpty ? nil : street, pm.locality].compactMap { $0 }.joined(separator: ", ")
+        }
+    }
+
     // MARK: Čerpací stanice pro motorku
     private var gasSearchToken = 0
     private var gasAnswered = false
@@ -615,7 +660,17 @@ final class AppModel: ObservableObject {
     private func activate(_ r: NavRoute, reason: String) {
         let name = activeStops.last?.name ?? T("Destination")
         navigator.setRoute(r)
-        voice.routeStarted(generation: navigator.routeGeneration, reroute: reason == "přepočet")
+        // Trasa začíná opačným směrem, než jedu? (Apple Mapy směr jízdy neznají)
+        var uTurn = false
+        if let loc = currentLocation, loc.speed > 3, loc.course >= 0, r.total > 60 {
+            let b = NavRoute.bearing(r.points[0], NavRoute.pointAt(points: r.points, cum: r.cum, d: 60))
+            var d = abs(loc.course - b).truncatingRemainder(dividingBy: 360)
+            if d > 180 { d = 360 - d }
+            uTurn = d > 120
+        }
+        navigator.setUTurn(uTurn)
+        if uTurn { log("↩️ Trasa začíná za námi – nejdřív otočit") }
+        voice.routeStarted(generation: navigator.routeGeneration, reroute: reason == "přepočet", uTurn: uTurn)
         assistEngine.setRoute(points: r.points, cum: r.cum, generation: navigator.routeGeneration)
         routeCoords = r.points.map { $0.coordinate }
         routeVersion += 1

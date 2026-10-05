@@ -1,18 +1,24 @@
-# NaviTest R9 – version 1.2
+# NaviTest R9 – version 1.3
 
-Voice guidance
-- "Turn now" now arrives with a real safety margin: at least 40 m even at low speed (~2.5–3 s of
-  travel), so it lands before the turn instead of during or after it.
+Dashboard
+- Route start is sent only after the dash really asks for the map / turn list (left column also when
+  the route was started before the bike connected).
+- Return via "Change View → Default View" (2+ map STOPs in a row) is detected and handled separately
+  from a normal return. Diagnostics → "After Change View": full route start (default) / only "done" /
+  nothing – to test which one brings the left column back. Every return is logged.
+
+Navigation
+- U-turn detection: when a new route starts behind the rider (Apple Maps doesn't know the direction of
+  travel), the voice says "Make a U-turn when it is safe", the dash shows the U-turn arrow and other
+  instructions are held back until the rider has turned around. Rerouting is calmer meanwhile
+  (45 s instead of 15 s), "Recalculating" is spoken at most every 30 s.
+- Location permission "Always": the iPhone may start the app on its own when the bike connects;
+  with "While Using" it got no location then.
 
 Rider assistance
-- Known route: camera/section warnings get 60% more lead than in free drive, since the position is
-  certain from the pre-fetched data ahead of time (braking may be needed, not just steering).
-- When OpenStreetMap doesn't distinguish a fixed camera from an unlinked average-speed-section point
-  (common in Czechia), the spoken alert now says "Speed check" instead of guessing "Radar" — the tone
-  and dashboard icon are unchanged, only the uncertain voice wording.
-
-Not changed this version: the dashboard's left-column panel disappearing after switching to
-Turn-by-Turn and back. This session's log shows no Turn-by-Turn content request at all, so nothing
-pointed to a specific cause — see the chat for what to capture next time it happens.
+- Data per cell in two queries: light (cameras, sections, schools) first, heavy (speed limits) after –
+  cameras arrive even when the limits time out.
+- Tapping a camera / section / red light / school pin on the phone map opens an info card (type,
+  limit, address); section control is drawn in red on the map.
 
 Map data © OpenStreetMap contributors, OpenFreeMap, © OpenMapTiles.
